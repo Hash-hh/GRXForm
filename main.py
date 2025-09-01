@@ -21,6 +21,7 @@ from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
 from molecule_evaluator import MoleculeObjectiveEvaluator
+from rl_updates import dr_grpo_update
 
 
 def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
@@ -29,9 +30,17 @@ def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     torch.save(checkpoint, path)
 
 
-def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTransformer, network_weights: dict,
-                        optimizer: torch.optim.Optimizer, objective_evaluator: MoleculeObjectiveEvaluator, best_objective: float):
-
+# ---------------- Supervised (original) epoch ---------------- #
+def train_for_one_epoch_supervised(epoch: int,
+                                   config: MoleculeConfig,
+                                   network: MoleculeTransformer,
+                                   network_weights: dict,
+                                   optimizer: torch.optim.Optimizer,
+                                   objective_evaluator: MoleculeObjectiveEvaluator,
+                                   best_objective: float):
+    """
+    Original supervised fine-tuning path (dataset generation + cross-entropy on heads).
+    """
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
@@ -48,22 +57,30 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     torch.cuda.empty_cache()
     time.sleep(1)
     print("---- Loading dataset")
-    dataset = RandomMoleculeDataset(config, config.gumbeldore_config["destination_path"], batch_size=config.batch_size_training,
+    dataset = RandomMoleculeDataset(config,
+                                    config.gumbeldore_config["destination_path"],
+                                    batch_size=config.batch_size_training,
                                     custom_num_batches=config.num_batches_per_epoch)
 
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=config.num_dataloader_workers,
-                            pin_memory=True, persistent_workers=True)
+    dataloader = DataLoader(dataset,
+                            batch_size=1,
+                            shuffle=True,
+                            num_workers=config.num_dataloader_workers,
+                            pin_memory=True,
+                            persistent_workers=True)
 
     # Train for one epoch
     network.train()
 
-    # freeze layers except the last
-    for parameter in network.parameters():
-        parameter.requires_grad = False
-    network.virtual_atom_linear.weight.requires_grad = True
-    network.virtual_atom_linear.bias.requires_grad = True
-    network.bond_atom_linear.weight.requires_grad = True
-    network.bond_atom_linear.bias.requires_grad = True
+    # freeze layers except the last (original behavior)
+
+    if config.freeze_all_except_final_layer:
+        for parameter in network.parameters():
+            parameter.requires_grad = False
+        network.virtual_atom_linear.weight.requires_grad = True
+        network.virtual_atom_linear.bias.requires_grad = True
+        network.bond_atom_linear.weight.requires_grad = True
+        network.bond_atom_linear.bias.requires_grad = True
 
     accumulated_loss_lvl_zero = 0
     accumulated_loss_lvl_one = 0
@@ -74,14 +91,13 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     for _ in progress_bar:
         data = next(data_iter)
         input_data = {k: v[0].to(network.device) for k, v in data["input"].items()}
-        # targets for the logit levels
         target_zero = data["target_zero"][0].to(network.device)
         target_one = data["target_one"][0].to(network.device)
         target_two = data["target_two"][0].to(network.device)
 
         logits_zero, logits_one, logits_two = network(input_data)
 
-        # We mask the output according to feasibility
+        # Apply feasibility masks (True = infeasible)
         logits_zero[input_data["feasibility_mask_level_zero"]] = float("-inf")
         logits_one[input_data["feasibility_mask_level_one"]] = float("-inf")
         logits_two[input_data["feasibility_mask_level_two"]] = float("-inf")
@@ -95,7 +111,6 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
         loss_two = torch.tensor(0.) if torch.isnan(loss_two) else loss_two
         loss = loss_zero + config.scale_factor_level_one * loss_one + config.scale_factor_level_two * loss_two
 
-        # Optimization step
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
 
@@ -122,7 +137,98 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     return metrics, top_20_molecules
 
 
+# ---------------- RL (Dr. GRPO) epoch ---------------- #
+def train_for_one_epoch_rl(epoch: int,
+                           config: MoleculeConfig,
+                           network: MoleculeTransformer,
+                           network_weights: dict,
+                           optimizer: torch.optim.Optimizer,
+                           objective_evaluator: MoleculeObjectiveEvaluator):
+    """
+    RL fine-tuning epoch:
+      1. Generate trajectories (terminated molecules) with current policy.
+      2. Run policy gradient update via dr_grpo_update.
+      3. Produce logging artifacts similar in spirit to supervised path.
+    """
+    print(f"[RL] Generating trajectories (epoch {epoch + 1})...")
+    gumbeldore_dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
+
+    # Return raw terminated trajectories (list of MoleculeDesign)
+    trajectories = gumbeldore_dataset.generate_dataset(
+        network_weights=network_weights,
+        best_objective=None,
+        memory_aggressive=False,
+        return_raw=True
+    )
+
+    if len(trajectories) == 0:
+        print("[RL] WARNING: No trajectories generated this epoch. Skipping update.")
+        return {
+            "num_trajectories": 0,
+            "policy_loss": 0.0,
+            "baseline": 0.0,
+            "mean_reward": float("-inf"),
+            "best_reward": float("-inf"),
+            "mean_advantage": 0.0,
+            "std_advantage": 0.0,
+            "fraction_pos_adv": 0.0
+        }, ["No molecules"]
+
+    # Freeze backbone (match supervised style)
+    if config.freeze_all_except_final_layer:
+        for p in network.parameters():
+            p.requires_grad = False
+        network.virtual_atom_linear.weight.requires_grad = True
+        network.virtual_atom_linear.bias.requires_grad = True
+        network.bond_atom_linear.weight.requires_grad = True
+        network.bond_atom_linear.bias.requires_grad = True
+
+    network.train()
+
+    print("training ...")
+    metrics = dr_grpo_update(
+        model=network,
+        optimizer=optimizer,
+        designs=trajectories,
+        config=config,
+        device=torch.device(config.training_device),
+        logger=None
+    )
+    print("dr GRPO update done.")
+    metrics["best_gen_obj"] = metrics.get("best_reward", float("-inf"))
+    metrics["mean_best_gen_obj"] = metrics.get("mean_reward", float("-inf"))
+    metrics.setdefault("loss_level_zero", 0.0)
+    metrics.setdefault("loss_level_one", 0.0)
+    metrics.setdefault("loss_level_two", 0.0)
+
+    # Build top 20 text artifact
+    mol_map = {}
+    for m in trajectories:
+        if m.objective is None:
+            continue
+        if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
+            mol_map[m.smiles_string] = {
+                "smiles": m.smiles_string,
+                "obj": m.objective
+            }
+    unique_mols = list(mol_map.values())
+    unique_mols.sort(key=lambda x: x["obj"], reverse=True)
+    top20 = unique_mols[:20]
+
+    top_20_text_lines = []
+    for i, entry in enumerate(top20):
+        top_20_text_lines.append(f"{i+1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
+    if not top20:
+        top_20_text_lines.append("No terminated molecules")
+
+    return metrics, top_20_text_lines
+
+
+# ---------------- Evaluation ---------------- #
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer, objective_evaluator: MoleculeObjectiveEvaluator):
+    """
+    Uses generation (supervised-style metrics) for evaluation irrespective of RL training.
+    """
     config = copy.deepcopy(config)
     config.gumbeldore_config["destination_path"] = None
 
@@ -152,7 +258,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.config is not None:
-        # Load config from given path
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
     config = MoleculeConfig()
 
@@ -162,13 +267,73 @@ if __name__ == '__main__':
 
     logger = Logger(args, config.results_path, config.log_to_file)
     logger.log_hyperparams(config)
-    # Fix random number generator seed for better reproducibility
+    # Seed
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
 
-    # Setup the neural network for training
+    # ------------------------------------------------------------------
+    # Top-K (all-time) SMILES archive (purely observational)
+    # Lines format: <objective>\t<SMILES>
+    # ------------------------------------------------------------------
+    TOP_K_OBS = 10
+    topk_archive_path = os.path.join(config.results_path, "top10_all_time_smiles.txt")
+    topk_smiles_scores = {}  # {smiles: best_objective}
+
+    def update_topk_archive_from_epoch(epoch_top20, rl_mode: bool):
+        """
+        epoch_top20:
+          - RL mode: list[str] lines like '01: SMILES  obj=0.1234'
+          - Supervised mode: list with a single dict {smiles: obj, ...}
+        """
+        if rl_mode:
+            for line in epoch_top20:
+                if "obj=" not in line:
+                    continue
+                try:
+                    after_rank = line.split(":", 1)[1].strip()
+                    tokens = after_rank.split()
+                    if not tokens:
+                        continue
+                    obj_token = None
+                    for t in reversed(tokens):
+                        if t.startswith("obj="):
+                            obj_token = t
+                            break
+                    if obj_token is None:
+                        continue
+                    obj_val = float(obj_token.split("obj=")[1])
+                    obj_index = tokens.index(obj_token)
+                    smiles = " ".join(tokens[:obj_index]).strip()
+                    if not smiles:
+                        continue
+                    prev = topk_smiles_scores.get(smiles)
+                    if (prev is None) or (obj_val > prev):
+                        topk_smiles_scores[smiles] = obj_val
+                except Exception:
+                    continue
+        else:
+            if not epoch_top20:
+                return
+            d = epoch_top20[0]
+            for smiles, obj_val in d.items():
+                prev = topk_smiles_scores.get(smiles)
+                if (prev is None) or (obj_val > prev):
+                    topk_smiles_scores[smiles] = obj_val
+
+        # Truncate to top K by objective
+        if len(topk_smiles_scores) > TOP_K_OBS:
+            sorted_items = sorted(topk_smiles_scores.items(), key=lambda x: x[1], reverse=True)[:TOP_K_OBS]
+            topk_smiles_scores.clear()
+            topk_smiles_scores.update(sorted_items)
+
+        # Persist: objective<TAB>SMILES (descending objective)
+        os.makedirs(config.results_path, exist_ok=True)
+        with open(topk_archive_path, "w") as f:
+            for smiles, score in sorted(topk_smiles_scores.items(), key=lambda x: x[1], reverse=True):
+                f.write(f"{score:.6f}\t{smiles}\n")
+
+    # Policy network
     network = MoleculeTransformer(config, config.training_device)
-    # Setup the GNN-based evaluator which predicts the objective function evaluation from a designed molecule.
     objective_evaluator = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
 
     # Load checkpoint if needed
@@ -182,8 +347,8 @@ if __name__ == '__main__':
             "best_model_weights": None,
             "optimizer_state": None,
             "epochs_trained": 0,
-            "validation_metric": float("-inf"),   # objective of the best molecule designed during validation.
-            "best_validation_metric": float("-inf")  # corresponding to best model weights
+            "validation_metric": float("-inf"),
+            "best_validation_metric": float("-inf")
         }
     if checkpoint["model_weights"] is not None:
         network.load_state_dict(checkpoint["model_weights"])
@@ -193,10 +358,9 @@ if __name__ == '__main__':
     network.eval()
 
     if config.num_epochs > 0:
-        # Training loop
         print(f"Starting training for {config.num_epochs} epochs.")
 
-        best_model_weights = checkpoint["best_model_weights"]  # can be None
+        best_model_weights = checkpoint["best_model_weights"]
         best_validation_metric = checkpoint["best_validation_metric"]
 
         print("Setting up optimizer.")
@@ -212,7 +376,7 @@ if __name__ == '__main__':
             )
         print("Setting up LR scheduler")
         _lambda = lambda epoch: config.optimizer["schedule"]["decay_factor"] ** (
-                    checkpoint["epochs_trained"] // config.optimizer["schedule"]["decay_lr_every_epochs"])
+                checkpoint["epochs_trained"] // config.optimizer["schedule"]["decay_lr_every_epochs"])
         scheduler = LambdaLR(optimizer, lr_lambda=_lambda)
 
         start_time_counter = None
@@ -222,29 +386,49 @@ if __name__ == '__main__':
 
         for epoch in range(config.num_epochs):
             print("------")
-            print(f"Generating dataset.")
             network_weights = copy.deepcopy(network.get_weights())
 
-            generated_loggable_dict, generated_text_to_save = train_for_one_epoch(
-                epoch, config, network, network_weights, optimizer, objective_evaluator, best_validation_metric
-            )
+            rl_mode_active = getattr(config, "use_dr_grpo", False)
+            if rl_mode_active:
+                generated_loggable_dict, top20_text = train_for_one_epoch_rl(
+                    epoch, config, network, network_weights, optimizer, objective_evaluator
+                )
+                val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
+                print(f"[RL] mean_reward={generated_loggable_dict.get('mean_reward', float('nan')):.4f} "
+                      f"policy_loss={generated_loggable_dict.get('policy_loss', float('nan')):.6f} "
+                      f"num_traj={generated_loggable_dict.get('num_trajectories', 0)} "
+                      f"mean_traj_len={generated_loggable_dict.get('mean_traj_length', 0):.1f}")
+
+            else:
+                generated_loggable_dict, top20_text = train_for_one_epoch_supervised(
+                    epoch, config, network, network_weights, optimizer, objective_evaluator, best_validation_metric
+                )
+                val_metric = generated_loggable_dict["best_gen_obj"]
+
+            # Update all-time top-K SMILES archive
+            try:
+                update_topk_archive_from_epoch(top20_text, rl_mode=rl_mode_active)
+            except Exception as e:
+                print(f"[TopK Archive] Warning: failed to update archive this epoch: {e}")
 
             checkpoint["epochs_trained"] += 1
             scheduler.step()
-            print(f">> Epoch {checkpoint['epochs_trained']}. Avg loss level 0: {generated_loggable_dict['loss_level_zero']},"
-                  f" Avg loss level 1: {generated_loggable_dict['loss_level_one']},"
-                  f" Avg loss level 2: {generated_loggable_dict['loss_level_two']}")
-            logger.log_metrics(generated_loggable_dict, step=epoch)
-            # Save the top 20 molecules
-            logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"), generated_text_to_save)
 
-            # Save model
+            print(f">> Epoch {checkpoint['epochs_trained']}. "
+                  f"Best (gen/rl) objective: {val_metric:.4f}")
+            logger.log_metrics(generated_loggable_dict, step=epoch)
+
+            if rl_mode_active:
+                logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"),
+                                     "\n".join(top20_text))
+            else:
+                logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"),
+                                     top20_text)
+
             checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
-            checkpoint["optimizer_state"] = copy.deepcopy(
-                dict_to_cpu(optimizer.state_dict())
-            )
-            val_metric = generated_loggable_dict["best_gen_obj"]   # measure by best objective found during sampling
+            checkpoint["optimizer_state"] = copy.deepcopy(dict_to_cpu(optimizer.state_dict()))
             checkpoint["validation_metric"] = val_metric
+
             save_checkpoint(checkpoint, "last_model.pt", config)
 
             if val_metric > best_validation_metric:
@@ -263,12 +447,15 @@ if __name__ == '__main__':
         print(f"Testing with loaded model.")
     else:
         print(f"Testing with best model.")
-        checkpoint = torch.load(os.path.join(config.results_path, "best_model.pt"))
-        network.load_state_dict(checkpoint["model_weights"])
+        best_ckpt_path = os.path.join(config.results_path, "best_model.pt")
+        if os.path.exists(best_ckpt_path):
+            checkpoint = torch.load(best_ckpt_path)
+            network.load_state_dict(checkpoint["model_weights"])
+        else:
+            print("WARNING: best_model.pt not found; using last model.")
 
     if checkpoint["model_weights"] is None and config.num_epochs == 0:
-        print("WARNING! No training was performed, but also no checkpoint to load was given. "
-              "Evaluating with random model.")
+        print("WARNING! No training performed and no checkpoint loaded. Evaluating random model.")
 
     torch.cuda.empty_cache()
     with torch.no_grad():

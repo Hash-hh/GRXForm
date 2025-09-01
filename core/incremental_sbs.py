@@ -22,6 +22,15 @@ from typing import Callable, List, Optional, Tuple, NoReturn
 
 sys.setrecursionlimit(10000)
 
+
+def _sanitize_inplace(arr: np.ndarray):
+    """Replace any NaN / +inf with -inf (treat as infeasible)."""
+    if arr is None:
+        return
+    bad = ~np.isfinite(arr)
+    if bad.any():
+        arr[bad] = -np.inf
+
 def log_subtract(x: float, y: float) -> float:
     """Returns log(exp(x) - exp(y)), or negative infinity if x <= y."""
     # Inspired by https://stackoverflow.com/questions/778047.
@@ -160,10 +169,13 @@ class _TrieNode(object):
         if not self.parent:  # is the root.
             return
         if self.exhausted():
-            new_log_mass = -np.inf  # explicitly set the node's log_mass to -inf to prevent sampling from it again.
+            new_log_mass = -np.inf
         else:
             new_log_mass = log_subtract(self.parent.unsampled_log_masses[self.index_in_parent], log_mass)
         self.parent.unsampled_log_masses[self.index_in_parent] = new_log_mass
+        # ---- Added sanitation to prevent NaNs from propagating ----
+        _sanitize_inplace(self.parent.unsampled_log_masses)
+        # -----------------------------------------------------------
         self.parent.mark_mass_sampled(log_mass)
 
 
@@ -259,50 +271,72 @@ class IncrementalSBS:
                 sbs_leaves_batch = [None] * len(unfinished_root_nodes)
 
             for batch_idx, beam_leaves in enumerate(sbs_leaves_batch):
-                # Get the best leaf and check if it is better than what we have
                 _idx = unfinished_root_indices[batch_idx]
-                if beam_leaves is not None:
-                    # Obtain the objective function evaluation for all leaves. Also add them to the list of all
-                    # leaves that we encountered.
+
+                # Case 1: This is an execution cycle (no replanning this step)
+                if beam_leaves is None:
+                    # If we have no pending actions (sequence empty), just wait until next replan step
+                    if not best_leaf_action_seqs_batch[_idx]:
+                        # Optional: if you prefer to discard this root when sequence is empty:
+                        # root_nodes[_idx] = None
+                        continue
+                    # We still have actions from previously planned sequence -> fall through to pop below.
+                else:
+                    # Planning cycle: got (possibly empty) beam_leaves
+                    if not beam_leaves:
+                        # No leaves produced; skip this root for now.
+                        # Optional: mark exhausted if this keeps happening.
+                        # root_nodes[_idx] = None
+                        continue
+
+                    # Evaluate leaves & accumulate
                     self.batch_leaf_evaluation_fn([y.state[1] for y in beam_leaves])
                     all_leaves[_idx].extend(
-                        [sbs.BeamLeaf(state=y.state[1], log_probability=y.log_probability, gumbel=0)
+                        [sbs.BeamLeaf(state=y.state[1],
+                                      log_probability=y.log_probability,
+                                      gumbel=0)
                          for y in beam_leaves]
                     )
 
-                    best_leaf = sorted(beam_leaves, key=lambda y: self.leaf_evaluation_fn(y.state[1]), reverse=True)[0]
+                    best_leaf = sorted(
+                        beam_leaves,
+                        key=lambda y: self.leaf_evaluation_fn(y.state[1]),
+                        reverse=True
+                    )[0]
                     best_leaf_node, best_leaf_client_state = best_leaf.state
-                    if best_leaf_batch[_idx] is None or self.leaf_evaluation_fn(
-                            best_leaf_client_state) > self.leaf_evaluation_fn(best_leaf_batch[_idx].state):
-                        # We have a best leaf. Add the best leaf to the solution list, but remove the trie node from the state so we don't hold on to it.
-                        # Also add the corresponding action sequence.
+                    if (best_leaf_batch[_idx] is None or
+                            self.leaf_evaluation_fn(best_leaf_client_state) >
+                            self.leaf_evaluation_fn(best_leaf_batch[_idx].state)):
                         best_leaf_batch[_idx] = best_leaf._replace(state=best_leaf_client_state)
                         best_leaf_action_seqs_batch[_idx] = best_leaf_node.get_action_sequence()
 
-                # Now as we have the best leaf (which can be unaltered), we get the root action of it and remove it
-                # from the action sequence
+                # SAFETY: If after planning (or during execution) we still have no actions queued, skip.
+                if not best_leaf_action_seqs_batch[_idx]:
+                    # Nothing to execute this iteration.
+                    continue
+
+                # Execute exactly one root-level action from the planned sequence.
                 root_action = best_leaf_action_seqs_batch[_idx].pop(0)
-                # Mark all sequences as sampled
-                if beam_leaves is not None:
+
+                # Mark sampled mass (only meaningful if we had beam_leaves this iteration,
+                # but harmless if re-executing; beam_leaves None => skip loop)
+                if beam_leaves:
                     for beam_leaf in beam_leaves:
                         leaf_node, client_state = beam_leaf.state
                         log_sampled_mass = leaf_node.initial_log_mass_if_not_sampled()
                         leaf_node.mark_mass_sampled(log_sampled_mass)
 
-                # Shift the root nodes
+                # Shift the root node forward by root_action
                 root_node, root_state = root_nodes[_idx]
                 if root_node.sbs_child_state_cache[root_action] is not None:
                     root_state = root_node.sbs_child_state_cache[root_action][0]
                 else:
-                    # we are in memory aggressive mode: transition again
                     root_state, is_leaf = self.child_transition_fn([(root_state, root_action)])[0]
-                    #if is_leaf:
-                    #    root_node.mark_leaf()
 
                 root_node = root_node.children[root_action]
                 root_node.parent = None
-                if not len(root_node.children) or root_node.exhausted():
-                    # is a leaf or we have sampled everything from it
+
+                if (not len(root_node.children)) or root_node.exhausted():
                     root_nodes[_idx] = None
                 else:
                     root_nodes[_idx] = (root_node, root_state)
@@ -386,35 +420,64 @@ class IncrementalSBS:
     @staticmethod
     def wrap_child_log_probability_fn(child_log_probability_fn, normalize_advantage_by_visit_count: bool) -> Callable[[List[Tuple[_TrieNode, sbs.State]]], List[np.ndarray]]:
         def wrapper_child_log_probability_fn(node_state_tuples: List[Tuple[_TrieNode, sbs.State]]) -> List[np.ndarray]:
-            """Computes child probabilities while updating the trie."""
+            """Computes child probabilities while updating the trie (robust to NaNs / all -inf)."""
             results = [None] * len(node_state_tuples)
-            unexpanded_client_states = []  # States for which we haven't computed log probs yet
-            unexpanded_indices = []  # Corresponding to index in `node_state_tuples`
+            unexpanded_client_states = []      # States needing fresh network logits
+            unexpanded_indices = []            # Their positions in node_state_tuples
 
             for i, (node, client_state) in enumerate(node_state_tuples):
                 if node.unsampled_log_masses is None:
-                    # We haven't computed log probs for this node yet.
+                    # Need to query policy network for this node.
                     unexpanded_client_states.append(client_state)
                     unexpanded_indices.append(i)
                 else:
-                    # We already have computed log probabilities for this node (and also may have already updated them!)
-                    # However, the log probs might not be normalized, so we need to normalize them.
-                    # Note that normalizing the log probs is the same as if we would first subtract the parent's log mass to obtain
-                    # the conditional log probs and then normalize them again
+                    # Reuse cached unsampled_log_masses (already shifted by ancestor mass).
+                    _sanitize_inplace(node.unsampled_log_masses)
                     log_unnormalized = node.unsampled_log_masses
 
-                    unnormalized = np.exp(log_unnormalized - np.max(log_unnormalized))
-                    with np.errstate(divide='ignore'):
-                        results[i] = np.log(unnormalized / np.sum(unnormalized))
+                    # Degenerate: all mass exhausted -> just propagate -inf vector.
+                    if np.all(np.isneginf(log_unnormalized)):
+                        results[i] = log_unnormalized.copy()
+                        continue
 
-            # Use client's child_log_probability_fn to get probabilities for unexpanded states.
+                    # Stable normalization: subtract max, exponentiate, normalize.
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        shift = np.max(log_unnormalized)
+                        exp_vals = np.exp(log_unnormalized - shift)
+                        # If everything underflows to 0, treat as all -inf.
+                        if np.all(exp_vals == 0):
+                            results[i] = np.full_like(log_unnormalized, -np.inf)
+                            continue
+                        denom = exp_vals.sum()
+                        if denom == 0 or not np.isfinite(denom):
+                            results[i] = np.full_like(log_unnormalized, -np.inf)
+                            continue
+                        probs = exp_vals / denom
+                        # Guard against numerical garbage
+                        badp = ~np.isfinite(probs)
+                        if badp.any():
+                            probs[badp] = 0.0
+                        with np.errstate(divide='ignore'):
+                            log_probs = np.log(probs)
+                    _sanitize_inplace(log_probs)
+                    results[i] = log_probs
+
+            # Fresh expansion: query policy network.
             if unexpanded_client_states:
                 client_fn_results = child_log_probability_fn(unexpanded_client_states)
                 for i, log_probs in zip(unexpanded_indices, client_fn_results):
+                    # Copy & sanitize new log probs
+                    log_probs = np.array(log_probs, copy=True)
+                    _sanitize_inplace(log_probs)
+
+                    # Store normalized conditional log probs as result
                     results[i] = log_probs
-                    # also set the log probs on the node for which we computed them
+
+                    # Cache unsampled_log_masses = conditional + parent mass
                     node = node_state_tuples[i][0]
-                    node.unsampled_log_masses = log_probs + node.initial_log_mass_if_not_sampled()
+                    base = node.initial_log_mass_if_not_sampled()
+                    node.unsampled_log_masses = log_probs + base
+                    _sanitize_inplace(node.unsampled_log_masses)
 
             return typing.cast(List[np.ndarray], results)
 

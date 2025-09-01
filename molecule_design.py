@@ -383,12 +383,69 @@ class MoleculeDesign(BaseTrajectory):
                 # Now we need to trim the padding corresponding to current action level
                 if mol.current_action_level != 2:
                     logits = logits[:len(mol.current_action_mask)]
-                log_probs_to_return.append(mol.masked_log_probs_for_current_action_level(logits))
+
+                # Mask + softmax -> log probs
+                log_probs = mol.masked_log_probs_for_current_action_level(logits)
+
+                # Sanitize: any NaN or +inf/-inf (apart from masked -inf) becomes -inf
+                if not np.isfinite(log_probs).all():
+                    bad = ~np.isfinite(log_probs)
+                    log_probs[bad] = -np.inf
+                log_probs_to_return.append(log_probs)
 
         return log_probs_to_return
 
+    # ------------------------------------------------------------------
+    # Shallow copy optimization
+    # ------------------------------------------------------------------
+    def _shallow_clone(self) -> 'MoleculeDesign':
+        """
+        Creates a lightweight clone of the molecule:
+        - Shares immutable / configuration structures.
+        - Copies mutable numpy arrays & history.
+        - Copies RDKit RWMol via constructor (cheap C++ copy).
+        - Copies current_action_mask so assertion in take_action still holds.
+        """
+        new = self.__class__.__new__(self.__class__)
+        # Immutable / shared references
+        new.config = self.config
+        new.atom_vocabulary = self.atom_vocabulary
+        new.vocabulary_atom_idcs = self.vocabulary_atom_idcs
+        new.vocabulary_atom_names = self.vocabulary_atom_names
+        new.vocabulary_valence = self.vocabulary_valence
+        new.atom_feasibility_mask = self.atom_feasibility_mask
+        new.pick_existing_atoms_start_action_idx_lvl_0 = self.pick_existing_atoms_start_action_idx_lvl_0
+        new.upper_limit_atoms = self.upper_limit_atoms
+        new.initial_atom = self.initial_atom
+
+        # Mutable state (copy)
+        new.atoms = self.atoms.copy()
+        new.bonds = self.bonds.copy()
+        new.topological_distance_matrix = self.topological_distance_matrix.copy()
+        new.rdkit_mol = Chem.RWMol(self.rdkit_mol)  # RDKit copy
+        new.synthesis_done = self.synthesis_done
+        new.smiles_string = self.smiles_string  # string or None
+        new.current_objective = self.current_objective
+        new.current_action_level = self.current_action_level
+        new.current_action_mask = None if self.current_action_mask is None else self.current_action_mask.copy()
+        new.history = self.history.copy()
+        new.objective = self.objective
+        new.sa_score = self.sa_score
+        new.infeasibility_flag = self.infeasibility_flag
+
+        # Constants
+        new.virtual_distance = self.virtual_distance
+        new.infinity_distance = self.infinity_distance
+
+        return new
+
     def transition_fn(self, action: int) -> Tuple['BaseTrajectory', bool]:
-        copied_molecule = copy.deepcopy(self)
+        """
+        Performs a shallow clone (faster than deepcopy) and applies the action.
+        Returns:
+            (new_trajectory, is_terminated)
+        """
+        copied_molecule = self._shallow_clone()
         copied_molecule.take_action(action)
         return copied_molecule, copied_molecule.synthesis_done
 
@@ -649,9 +706,6 @@ class MoleculeDesign(BaseTrajectory):
             atom_idx = atomic_num_to_atom_idx[k]
             atom_idcs_for_design.append(atom_idx)
 
-        # Convert adjacency matrix to int to not track .5-bonds
-        #adjacency_matrix = adjacency_matrix.astype(int)
-
         # Start by creating the design and setting the first atom as the start atom
         design = MoleculeDesign(config, atom_idcs_for_design[0])
         # We now iterate over each atom.
@@ -661,7 +715,6 @@ class MoleculeDesign(BaseTrajectory):
             # We now want to get the most recent index to which the new atom is bonded. This is used as the initial
             # bond of the new atom.
             atom_is_placed = False
-            #for j in range(i-1, -1, -1):  # Loop backwards
             for j in range(0, i):
                 desired_bond_order = adjacency_matrix[i, j]
                 if desired_bond_order > 0:
