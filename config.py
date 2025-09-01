@@ -119,7 +119,7 @@ class MoleculeConfig:
             "max_leaves_per_root": 200,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
             "pin_workers_to_core": False,
 
-            "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
+            "leaf_sampling_mode": "random",  # "random" | "stratified" | "topk"
             "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
             "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             "stratified_allow_shortfall_fill": True
@@ -151,7 +151,7 @@ class MoleculeConfig:
         self.rl_debug_verify_replay = False  # If True, re-generate a SMILES (if available) before and after replay step to assert equality
 
         self.rl_streaming_backward = True  # Enable streaming per-step backward
-        self.rl_replay_microbatch_size = 32  # Microbatch size for streaming (0 or None => all)
+        self.rl_replay_microbatch_size = 64  # Microbatch size for streaming (0 or None => all)
 
         # Add inside MoleculeConfig.__init__ (anywhere after existing RL flags)
         self.use_amp = True  # Enable AMP for RL fine-tuning
