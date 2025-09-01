@@ -80,7 +80,7 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 3  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
@@ -104,8 +104,8 @@ class MoleculeConfig:
             # Number of trajectories with the the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
-            # "devices_for_workers": ["cuda:0"] * 1,
-            "devices_for_workers": ["cuda:0", "cuda:1"],
+            "devices_for_workers": ["cuda:0"] * 1,
+            # "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
@@ -133,7 +133,7 @@ class MoleculeConfig:
 
         # Dr. GRPO / RL fine-tuning additions
         self.use_dr_grpo = True  # Switch to enable RL instead of supervised imitation
-        self.rl_batched_replay = True
+        self.rl_batched_replay = True # Fallback path (ignored if streaming enabled)
         self.rl_recompute_log_probs = True  # Always True for V1 (post-hoc REINFORCE)
         self.rl_entropy_coef = 0.0  # No entropy bonus for V1
         self.rl_store_trajectories_path = None  # Optional: path to pickle the last epoch's trajectories for debugging
@@ -149,6 +149,9 @@ class MoleculeConfig:
 
         # Safety / diagnostics
         self.rl_debug_verify_replay = False  # If True, re-generate a SMILES (if available) before and after replay step to assert equality
+
+        self.rl_streaming_backward = True  # Enable streaming per-step backward
+        self.rl_replay_microbatch_size = 32  # Microbatch size for streaming (0 or None => all)
 
         # Add inside MoleculeConfig.__init__ (anywhere after existing RL flags)
         self.use_amp = True  # Enable AMP for RL fine-tuning
