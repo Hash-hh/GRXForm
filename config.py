@@ -116,10 +116,10 @@ class MoleculeConfig:
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
             "nucleus_top_p": 1.,
-            "max_leaves_per_root": 200,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
+            "max_leaves_per_root": 300,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
             "pin_workers_to_core": False,
 
-            "leaf_sampling_mode": "random",  # "random" | "stratified" | "topk"
+            "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
             "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
             "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             "stratified_allow_shortfall_fill": True
@@ -152,6 +152,13 @@ class MoleculeConfig:
 
         self.rl_streaming_backward = True  # Enable streaming per-step backward
         self.rl_replay_microbatch_size = 64  # Microbatch size for streaming (0 or None => all)
+
+        self.rl_entropy_coef = 0.005
+        self.rl_entropy_improvement_delta = 0.02
+        self.rl_entropy_decay_factor = 0.7
+        self.rl_entropy_min_coef = 0.001
+        self.rl_use_ema_baseline = True
+        self.rl_baseline_ema_alpha = 0.9
 
         # Add inside MoleculeConfig.__init__ (anywhere after existing RL flags)
         self.use_amp = True  # Enable AMP for RL fine-tuning

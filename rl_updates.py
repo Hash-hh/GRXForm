@@ -42,18 +42,43 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
 
 
 def compute_baseline_and_advantages(records: List[TrajectoryRecord],
-                                    normalize: bool = False) -> float:
+                                    normalize: bool = False,
+                                    config=None) -> float:
+    """
+    Computes advantages. If rl_use_ema_baseline enabled, uses the EMA baseline
+    value PRIOR to updating it, then updates EMA for next call.
+    Returns the baseline that was actually subtracted (for logging).
+    """
     if not records:
         return 0.0
     rewards = torch.tensor([r.reward for r in records], dtype=torch.float32)
-    baseline = rewards.mean().item()
-    advantages = rewards - rewards.mean()
+    batch_mean = rewards.mean().item()
+
+    use_ema = bool(getattr(config, "rl_use_ema_baseline", False)) if config is not None else False
+    if use_ema:
+        alpha = float(getattr(config, "rl_baseline_ema_alpha", 0.9))
+        # Initialize EMA on first use
+        if not hasattr(config, "_ema_baseline"):
+            config._ema_baseline = batch_mean
+            config._ema_initialized = True
+        baseline = float(config._ema_baseline)  # use current EMA as baseline
+        # Update EMA for NEXT round
+        config._ema_baseline = alpha * config._ema_baseline + (1.0 - alpha) * batch_mean
+        # Store batch_mean separately for logging
+        config._last_batch_mean_reward = batch_mean
+    else:
+        baseline = batch_mean
+        if config is not None:
+            config._last_batch_mean_reward = batch_mean
+
+    advantages = rewards - baseline
     if normalize:
         std = advantages.std()
         if std > 1e-8:
             advantages = advantages / std
+
     for i, r in enumerate(records):
-        r.advantage = advantages[i].item()
+        r.advantage = float(advantages[i].item())
     return baseline
 
 
@@ -194,7 +219,7 @@ def batched_replay_and_compute_log_probs(
         rec.length = lengths[i]
 
 
-# --------- STREAMING BACKWARD (FIXED) ---------
+# --------- STREAMING BACKWARD (FIXED + ENTROPY) ---------
 def streaming_replay_and_backward(model: MoleculeTransformer,
                                   optimizer: torch.optim.Optimizer,
                                   records: List[TrajectoryRecord],
@@ -204,18 +229,17 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                                   scaler):
     """
     Streaming (per-step) backward with microbatching.
-    For each replay step (single forward over current active subset) we:
-      - accumulate a scalar loss_batch across active trajectories
-      - call backward exactly once on that scalar
-    This avoids reusing a freed graph while keeping activation memory low.
+    Adds entropy regularization:
+      Loss = -(1/N) * Σ_i A_i Σ_t log π(a_{i,t}|s_{i,t}) - (β / N) * Σ_{i,t} H(π(·|s_{i,t}))
+    where β = rl_entropy_coef.
     """
-    model.eval()  # deterministic
+    model.eval()
     assert all(r.advantage is not None for r in records), "Compute advantages first."
     N = len(records)
     if N == 0:
         return 0.0
 
-    # Init metrics fields
+    # Initialize per-trajectory bookkeeping
     for rec in records:
         rec.log_prob_sum = torch.tensor(0.0, device=device)
         rec.length = 0
@@ -225,10 +249,16 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
     micro = getattr(config, "rl_replay_microbatch_size", 0) or N
     assert micro > 0, "Microbatch size must be > 0"
 
-    # For logging: accumulate Σ_i A_i Σ_t logp
-    sum_adv_logp = 0.0
+    entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0) or 0.0)
 
-    # Slice into microbatches of trajectories
+    # Logging accumulators
+    sum_adv_logp = 0.0
+    entropy_total = 0.0
+    entropy_step_count = 0
+    # Per-level entropy logging
+    entropy_level_sums = {0: 0.0, 1: 0.0, 2: 0.0}
+    entropy_level_counts = {0: 0, 1: 0, 2: 0}
+
     for start in range(0, N, micro):
         batch_records = records[start:start + micro]
         clones = [_fresh_initial_clone(r.design) for r in batch_records]
@@ -247,12 +277,11 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             with autocast_ctx:
                 head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
 
-            # Accumulate per-step loss across active trajectories, then backward once.
-            if scaler is not None:
-                # Use FP32 accumulator outside scaled region? Simpler to accumulate inside.
-                loss_batch = 0.0
-            else:
-                loss_batch = torch.tensor(0.0, device=device, dtype=head0.dtype)
+            # Scalar tensor accumulator keeping graph (fixes previous fp16 bug)
+            loss_batch = torch.zeros((), device=device, dtype=head0.dtype)
+
+            step_entropy_sum = 0.0  # numerical accumulation for logging
+            level_entropy_this_step = []
 
             for pos_in_active, local_idx in enumerate(active_local_indices):
                 rec = batch_records[local_idx]
@@ -271,39 +300,49 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                     level_logits, clone.current_action_mask, device,
                     assert_masks=getattr(config, "rl_assert_masks", False)
                 )
+                if entropy_coef > 0.0:
+                    probs = log_probs.exp()
+                    ent = -(probs * log_probs).sum()  # differentiable
+                    step_entropy_sum += float(ent.detach().cpu())
+                    level_entropy_this_step.append((lvl, float(ent.detach().cpu())))
+                    # Entropy term added AFTER loop (aggregated)
                 action = rec.history[cursor]
                 if action >= log_probs.shape[0]:
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
 
                 chosen_logp = log_probs[action]
-                # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
                 rec.length += 1
                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
 
-                # Form loss contribution (tensor)
-                # Loss overall: -(1/N) * Σ_i A_i Σ_t logp
                 contrib = -(rec.advantage / N) * chosen_logp
-                if scaler is not None:
-                    # Accumulate as Python float; we will wrap in a tensor at backward time
-                    loss_batch += float(contrib.detach().cpu())
-                else:
-                    loss_batch = loss_batch + contrib
+                loss_batch = loss_batch + contrib
 
-                # Advance environment
                 clone.take_action(action)
                 cursors[local_idx] += 1
                 if clone.synthesis_done or cursors[local_idx] >= len(rec.history):
                     finished[local_idx] = True
 
-            # Single backward for this step
+            # Apply aggregated entropy term once per replay step
+            if entropy_coef > 0.0 and step_entropy_sum > 0.0:
+                # Loss term: -(entropy_coef / N) * sum_{active states} H
+                entropy_loss = torch.tensor((-entropy_coef / N) * step_entropy_sum,
+                                            device=device, dtype=loss_batch.dtype)
+                loss_batch = loss_batch + entropy_loss
+                entropy_total += step_entropy_sum
+                entropy_step_count += len(active_local_indices)
+                # Update per-level logs
+                for lvl, ent_val in level_entropy_this_step:
+                    entropy_level_sums[lvl] += ent_val
+                    entropy_level_counts[lvl] += 1
+
+            # Single backward
             if scaler is not None:
-                loss_batch_tensor = torch.tensor(loss_batch, device=device, dtype=head0.dtype, requires_grad=True)
-                scaler.scale(loss_batch_tensor).backward()
+                scaler.scale(loss_batch).backward()
             else:
                 loss_batch.backward()
 
-    # Finish optimizer step
+    # Optimizer step
     clip_val = config.optimizer.get("gradient_clipping", 0)
     if scaler is not None:
         if clip_val and clip_val > 0:
@@ -316,8 +355,20 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         optimizer.step()
 
-    # Compute logged policy loss
     policy_loss_value = -(1.0 / N) * sum_adv_logp
+
+    # Store logging stats in config (so dr_grpo_update can pick them up)
+    if entropy_step_count > 0:
+        config._last_entropy_mean = entropy_total / entropy_step_count
+    else:
+        config._last_entropy_mean = 0.0
+    for lvl in (0, 1, 2):
+        if entropy_level_counts[lvl] > 0:
+            setattr(config, f"_last_entropy_mean_level{lvl}",
+                    entropy_level_sums[lvl] / entropy_level_counts[lvl])
+        else:
+            setattr(config, f"_last_entropy_mean_level{lvl}", 0.0)
+
     return policy_loss_value
 
 
@@ -352,7 +403,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         return metrics
 
     normalize_adv = getattr(config, "rl_advantage_normalize", False)
-    baseline = compute_baseline_and_advantages(records, normalize=normalize_adv)
+    baseline = compute_baseline_and_advantages(records, normalize=normalize_adv, config=config)
 
     use_streaming = getattr(config, "rl_streaming_backward", False)
 
@@ -363,7 +414,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         )
         replay_mode = "streaming"
     else:
-        # Fallback: old accumulate-then-backward path
+        # Fallback (entropy not applied here yet)
         assert_masks = getattr(config, "rl_assert_masks", False)
         autocast_ctx, scaler = _make_autocast_ctx(config)
         use_batched = getattr(config, "rl_batched_replay", True) and len(records) > 1
@@ -394,7 +445,9 @@ def dr_grpo_update(model: MoleculeTransformer,
                 "none_dropped": none_dropped,
                 "amp_enabled": bool(getattr(config, "use_amp", False)),
                 "amp_dtype": getattr(config, "amp_dtype", "none"),
-                "adv_norm": bool(normalize_adv)
+                "adv_norm": bool(normalize_adv),
+                "entropy_coef": float(getattr(config, "rl_entropy_coef", 0.0)),
+                "mean_step_entropy": 0.0
             }
             return metrics
 
@@ -423,8 +476,38 @@ def dr_grpo_update(model: MoleculeTransformer,
     mean_adv = sum(advantages) / len(advantages)
     std_adv = (sum((a - mean_adv) ** 2 for a in advantages) / len(advantages)) ** 0.5 if advantages else 0.0
 
+    entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0))
+    mean_step_entropy = float(getattr(config, "_last_entropy_mean", 0.0))
+    mean_entropy_level0 = float(getattr(config, "_last_entropy_mean_level0", 0.0))
+    mean_entropy_level1 = float(getattr(config, "_last_entropy_mean_level1", 0.0))
+    mean_entropy_level2 = float(getattr(config, "_last_entropy_mean_level2", 0.0))
+
+    # Improvement-triggered entropy decay (applies to NEXT epoch)
+    if entropy_coef > 0.0:
+        best_reward = max(rewards)
+        if not hasattr(config, "_entropy_base_best_reward"):
+            config._entropy_base_best_reward = best_reward
+            config._entropy_decays_done = 0
+        delta_target = float(getattr(config, "rl_entropy_improvement_delta", 0.02))
+        decay_factor = float(getattr(config, "rl_entropy_decay_factor", 0.7))
+        min_coef = float(getattr(config, "rl_entropy_min_coef", 0.001))
+        decays_done = int(getattr(config, "_entropy_decays_done", 0))
+        improvement = best_reward - config._entropy_base_best_reward
+        needed = (decays_done + 1) * delta_target
+        if improvement >= needed and entropy_coef > min_coef:
+            new_coef = max(min_coef, entropy_coef * decay_factor)
+            setattr(config, "rl_entropy_coef", new_coef)
+            config._entropy_decays_done = decays_done + 1
+            config._entropy_last_decay_at_reward = best_reward
+        else:
+            new_coef = entropy_coef
+    else:
+        new_coef = entropy_coef
+
     metrics = {
         "baseline": baseline,
+        "batch_mean_reward": float(getattr(config, "_last_batch_mean_reward", baseline)),
+        "ema_baseline_active": bool(getattr(config, "rl_use_ema_baseline", False)),
         "mean_reward": float(mean_reward),
         "best_reward": float(max(rewards)),
         "mean_advantage": float(mean_adv),
@@ -438,7 +521,14 @@ def dr_grpo_update(model: MoleculeTransformer,
         "none_dropped": none_dropped,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
         "amp_dtype": getattr(config, "amp_dtype", "none"),
-        "adv_norm": bool(normalize_adv)
+        "adv_norm": bool(normalize_adv),
+        "entropy_coef": float(entropy_coef),
+        "entropy_coef_next": float(new_coef),
+        "mean_step_entropy": mean_step_entropy,
+        "mean_entropy_level0": mean_entropy_level0,
+        "mean_entropy_level1": mean_entropy_level1,
+        "mean_entropy_level2": mean_entropy_level2,
+        "entropy_decays_done": int(getattr(config, "_entropy_decays_done", 0))
     }
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
