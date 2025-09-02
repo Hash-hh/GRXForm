@@ -16,8 +16,10 @@ class TrajectoryRecord:
     log_prob_sum: Optional[torch.Tensor] = None
     length: Optional[int] = None
     advantage: Optional[float] = None
-    replay_failed: bool = False  # (not used in streaming path unless you extend soft-fail)
+    replay_failed: bool = False  # placeholder (unused)
 
+
+# ------------------ Record & Advantage Utilities ------------------ #
 
 def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryRecord], int, int):
     records: List[TrajectoryRecord] = []
@@ -26,7 +28,8 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
     for d in designs:
         if not d.history:
             continue
-        if not (d.history[-1] == 0 and d.synthesis_done):
+        # Termination condition: last action==0 and synthesis_done
+        if not (d.history and d.history[-1] == 0 and d.synthesis_done):
             continue
         obj = d.objective
         if obj is None:
@@ -45,9 +48,8 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
                                     normalize: bool = False,
                                     config=None) -> float:
     """
-    Computes advantages. If rl_use_ema_baseline enabled, uses the EMA baseline
-    value PRIOR to updating it, then updates EMA for next call.
-    Returns the baseline that was actually subtracted (for logging).
+    Computes trajectory-level advantages A_i and stores them in each record.
+    If EMA baseline configured, uses baseline BEFORE updating it (standard).
     """
     if not records:
         return 0.0
@@ -81,6 +83,7 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
 
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
+    # atoms[0] = virtual atom; atoms[1] first real atom (confirmed)
     first_atom_token = final_design.atoms[1]
     if hasattr(first_atom_token, "item"):
         first_atom_token = int(first_atom_token.item())
@@ -90,7 +93,14 @@ def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
 def _prepare_masked_log_probs(level_logits: torch.Tensor,
                               mask_list,
                               device: torch.device,
-                              assert_masks: bool = True) -> torch.Tensor:
+                              assert_masks: bool = True):
+    """
+    Applies infeasible mask (True=infeasible), returns:
+      log_probs (log-softmax over full vector with infeasible = -inf),
+      infeasible_mask (bool tensor),
+      feasible_mask (bool tensor)
+    If assert_masks=True: structural checks on shape & at least one feasible action.
+    """
     if isinstance(mask_list, torch.Tensor):
         infeasible_mask = mask_list.to(device=device, dtype=torch.bool)
     else:
@@ -99,13 +109,16 @@ def _prepare_masked_log_probs(level_logits: torch.Tensor,
         assert level_logits.shape[0] >= infeasible_mask.shape[0], \
             f"Logits shorter ({level_logits.shape[0]}) than mask ({infeasible_mask.shape[0]})"
     level_logits = level_logits[:infeasible_mask.shape[0]]
-    feasible_any = (~infeasible_mask).any().item()
+    feasible_mask = ~infeasible_mask
+    feasible_any = feasible_mask.any().item()
     if assert_masks:
         assert feasible_any, "All actions masked; invalid environment state."
     if not feasible_any:
+        # fallback zero logits to avoid NaNs in log_softmax; action feasibility guard later will raise if chosen infeasible
         level_logits = torch.zeros_like(level_logits)
     level_logits = level_logits.masked_fill(infeasible_mask, float("-inf"))
-    return torch.log_softmax(level_logits, dim=-1)
+    log_probs = torch.log_softmax(level_logits, dim=-1)
+    return log_probs, infeasible_mask, feasible_mask
 
 
 def _make_autocast_ctx(config):
@@ -121,155 +134,90 @@ def _make_autocast_ctx(config):
     return ctx, scaler
 
 
-# --------- (OLD fallback replay functions) ---------
-def sequential_replay_and_compute_log_probs(
+# ------------------ Streaming Update (Only Path) ------------------ #
+
+def _streaming_update_normalized(
         model: MoleculeTransformer,
+        optimizer: torch.optim.Optimizer,
         records: List[TrajectoryRecord],
-        device: torch.device,
-        autocast_ctx,
-        assert_masks: bool,
-        debug_verify: bool = False
-):
-    model.eval()
-    for rec in records:
-        design_clone = _fresh_initial_clone(rec.design)
-        rec.log_prob_sum = torch.tensor(0.0, device=device)
-        steps = 0
-        for action in rec.history:
-            if design_clone.synthesis_done:
-                break
-            with autocast_ctx:
-                batch = MoleculeDesign.list_to_batch([design_clone], device=device)
-                head0, head1, head2 = model(batch)
-                current_level = design_clone.current_action_level
-                if current_level == 0:
-                    level_logits = head0[0]
-                elif current_level == 1:
-                    level_logits = head1[0]
-                else:
-                    level_logits = head2[0]
-                log_probs = _prepare_masked_log_probs(level_logits, design_clone.current_action_mask, device,
-                                                      assert_masks=assert_masks)
-            if action >= log_probs.shape[0]:
-                raise RuntimeError(f"[Replay] Action {action} out of bounds {log_probs.shape[0]}")
-            rec.log_prob_sum = rec.log_prob_sum + log_probs[action].detach().float()
-            steps += 1
-            design_clone.take_action(action)
-            if design_clone.synthesis_done:
-                break
-        rec.length = steps
-
-
-def batched_replay_and_compute_log_probs(
-        model: MoleculeTransformer,
-        records: List[TrajectoryRecord],
-        device: torch.device,
-        autocast_ctx,
-        assert_masks: bool,
-        debug_verify: bool = False
-):
-    model.eval()
-    n = len(records)
-    if n == 0:
-        return
-    clones = [_fresh_initial_clone(r.design) for r in records]
-    cursors = [0] * n
-    lengths = [0] * n
-    log_sums = [torch.tensor(0.0, device=device) for _ in records]
-
-    active = [i for i in range(n)]
-    while active:
-        batch_clones = [clones[i] for i in active]
-        with autocast_ctx:
-            head0, head1, head2 = model(MoleculeDesign.list_to_batch(batch_clones, device=device))
-        remove = []
-        for local_pos, rec_idx in enumerate(active):
-            rec = records[rec_idx]
-            clone = clones[rec_idx]
-            cursor = cursors[rec_idx]
-            if cursor >= len(rec.history) or clone.synthesis_done:
-                remove.append(rec_idx)
-                continue
-            lvl = clone.current_action_level
-            if lvl == 0:
-                level_logits = head0[local_pos]
-            elif lvl == 1:
-                level_logits = head1[local_pos]
-            else:
-                level_logits = head2[local_pos]
-            log_probs = _prepare_masked_log_probs(level_logits, clone.current_action_mask, device,
-                                                  assert_masks=assert_masks)
-            action = rec.history[cursor]
-            if action >= log_probs.shape[0]:
-                raise RuntimeError(f"[Replay] Action {action} out of bounds {log_probs.shape[0]}")
-            log_sums[rec_idx] = log_sums[rec_idx] + log_probs[action].detach().float()
-            lengths[rec_idx] += 1
-            cursors[rec_idx] += 1
-            clone.take_action(action)
-            if clone.synthesis_done or cursors[rec_idx] >= len(rec.history):
-                remove.append(rec_idx)
-        if remove:
-            done = set(remove)
-            active = [i for i in active if i not in done]
-
-    for i, rec in enumerate(records):
-        rec.log_prob_sum = log_sums[i]
-        rec.length = lengths[i]
-
-
-# --------- STREAMING BACKWARD (with entropy + instrumentation FIXED) ---------
-def streaming_replay_and_backward(model: MoleculeTransformer,
-                                  optimizer: torch.optim.Optimizer,
-                                  records: List[TrajectoryRecord],
-                                  config,
-                                  device: torch.device,
-                                  autocast_ctx,
-                                  scaler):
+        config,
+        device: torch.device):
     """
-    Streaming (per-step) backward with microbatching.
-    Entropy regularization (only over feasible actions to avoid NaNs):
-      Loss = -(1/N) Σ_i A_i Σ_t log π(a_{i,t}|s_{i,t}) - (β / N) Σ_{i,t} H_feasible(s_{i,t})
-    where H_feasible excludes masked actions.
+    Streaming replay + backward with optional length & feasible-count normalization.
+
+    If rl_entropy_length_normalize:
+        L = -(Σ_t A_i log π(a_t|s_t))/S_total - β * (Σ_t H_norm_t)/S_total
+    Else:
+        L = -(1/N) Σ_i Σ_t A_i log π(a_t|s_t) - β * (1/N) Σ_t H_norm_t
+
+    H_raw_t = -Σ_{feasible a} p(a) log p(a)
+    H_norm_t:
+        if feasible_count <= 1 -> 0
+        else H_raw_t / log(feasible_count) if rl_entropy_use_feasible_log_scaling else H_raw_t
+
+    Per-level entropy metrics count only states with feasible_count > 1 (since others have 0 entropy).
     """
-    model.eval()
     assert all(r.advantage is not None for r in records), "Compute advantages first."
     N = len(records)
     if N == 0:
-        return 0.0
+        return {
+            "policy_loss_value": 0.0,
+            "mean_entropy_norm": 0.0,
+            "mean_entropy_raw": 0.0,
+            "per_level_entropy_norm": {0: 0.0, 1: 0.0, 2: 0.0},
+            "per_level_avg_feasible": {0: 0.0, 1: 0.0, 2: 0.0},
+            "total_states": 0
+        }
 
-    for rec in records:
-        rec.log_prob_sum = torch.tensor(0.0, device=device)
-        rec.length = 0
+    for r in records:
+        r.length = len(r.history)
+        r.log_prob_sum = torch.tensor(0.0, device=device)
 
-    optimizer.zero_grad(set_to_none=True)
+    S_total = sum(r.length for r in records)
+    if S_total == 0:
+        return {
+            "policy_loss_value": 0.0,
+            "mean_entropy_norm": 0.0,
+            "mean_entropy_raw": 0.0,
+            "per_level_entropy_norm": {0: 0.0, 1: 0.0, 2: 0.0},
+            "per_level_avg_feasible": {0: 0.0, 1: 0.0, 2: 0.0},
+            "total_states": 0
+        }
+
+    length_norm = bool(getattr(config, "rl_entropy_length_normalize", True))
+    feasible_log_scaling = bool(getattr(config, "rl_entropy_use_feasible_log_scaling", True))
+    entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0) or 0.0)
+    assert_masks = bool(getattr(config, "rl_assert_masks", False))
+    debug_entropy = bool(getattr(config, "rl_debug_entropy", False))
+    debug_print_first = int(getattr(config, "rl_debug_entropy_print_first", 12)) \
+        if hasattr(config, "rl_debug_entropy_print_first") else 12
+
+    # Optional one-time reminder when entropy disabled but metrics computed
+    if entropy_coef == 0.0 and debug_entropy and not hasattr(config, "_warned_entropy_off"):
+        print("[ENTROPY] entropy_coef=0.0: metrics still computed (no gradient contribution).")
+        config._warned_entropy_off = True
+
+    denom_policy = S_total if length_norm else N
+    denom_entropy = S_total if length_norm else N
+
+    # Float32 accumulators (more stable under AMP)
+    sum_adv_logp = 0.0
+    sum_entropy_raw = 0.0
+    sum_entropy_norm = 0.0
+
+    per_level_entropy_norm_sum = {0: 0.0, 1: 0.0, 2: 0.0}
+    per_level_entropy_norm_count = {0: 0, 1: 0, 2: 0}
+    per_level_feasible_sum = {0: 0.0, 1: 0.0, 2: 0.0}
+    per_level_feasible_count = {0: 0, 1: 0, 2: 0}
+
+    debug_lines_printed = 0
 
     micro = getattr(config, "rl_replay_microbatch_size", 0) or N
     assert micro > 0, "Microbatch size must be > 0"
 
-    entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0) or 0.0)
-    debug_entropy = bool(getattr(config, "rl_debug_entropy", False))
-    debug_print_first = int(getattr(config, "rl_debug_entropy_print_first", 10))
-
-    # Policy / entropy accumulators
-    sum_adv_logp = 0.0
-    entropy_total = 0.0
-    entropy_step_count = 0  # counts states where entropy computed (feasible_count >=1)
-
-    # Per-level entropy sums & counts
-    entropy_level_sums = {0: 0.0, 1: 0.0, 2: 0.0}
-    entropy_level_counts = {0: 0, 1: 0, 2: 0}
-
-    # Per-level feasible action stats
-    steps_level = {0: 0, 1: 0, 2: 0}
-    singleton_steps_level = {0: 0, 1: 0, 2: 0}
-    feasible_sum_level = {0: 0, 1: 0, 2: 0}
-
-    # Probability sharpness stats (only for steps with >=2 feasible)
-    max_prob_sum_level = {0: 0.0, 1: 0.0, 2: 0.0}
-    top2_gap_sum_level = {0: 0.0, 1: 0.0, 2: 0.0}
-    multi_action_steps_level = {0: 0, 1: 0, 2: 0}
-
-    debug_lines_printed = 0
+    model.eval()  # deterministic logits (dropout=0 anyway)
+    autocast_ctx, scaler = _make_autocast_ctx(config)
+    optimizer.zero_grad(set_to_none=True)
 
     for start in range(0, N, micro):
         batch_records = records[start:start + micro]
@@ -289,10 +237,8 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             with autocast_ctx:
                 head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
 
-            loss_batch = torch.zeros((), device=device, dtype=head0.dtype)
-            step_entropy_sum = 0.0
-            step_entropy_states = 0  # number of feasible states contributing (for gating)
-            level_entropy_this_step = []
+            # Keep loss_batch in float32 for stability
+            loss_batch = torch.zeros((), device=device, dtype=torch.float32)
 
             for pos_in_active, local_idx in enumerate(active_local_indices):
                 rec = batch_records[local_idx]
@@ -307,96 +253,80 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 else:
                     level_logits = head2[pos_in_active]
 
-                # Build mask tensor to inspect feasible count
-                mask_list = clone.current_action_mask
-                if isinstance(mask_list, torch.Tensor):
-                    infeasible_mask = mask_list.to(device=device, dtype=torch.bool)
-                else:
-                    infeasible_mask = torch.tensor(mask_list, dtype=torch.bool, device=device)
-
-                feasible_mask = ~infeasible_mask
-                feasible_count = feasible_mask.sum().item()
-                steps_level[lvl] += 1
-                feasible_sum_level[lvl] += feasible_count
-                if feasible_count == 1:
-                    singleton_steps_level[lvl] += 1
-
-                log_probs = _prepare_masked_log_probs(
-                    level_logits, infeasible_mask, device,
-                    assert_masks=getattr(config, "rl_assert_masks", False)
+                log_probs, infeasible_mask, feasible_mask = _prepare_masked_log_probs(
+                    level_logits, clone.current_action_mask, device, assert_masks=assert_masks
                 )
 
-                # Compute entropy ONLY over feasible actions to avoid 0 * -inf = NaN
-                if entropy_coef > 0.0 and feasible_count > 0:
-                    log_probs_feas = log_probs[feasible_mask]
-                    probs_feas = log_probs_feas.exp()
-                    ent = -(probs_feas * log_probs_feas).sum()
-                    if torch.isfinite(ent):
-                        ent_val = float(ent.detach().cpu())
-                        step_entropy_sum += ent_val
-                        step_entropy_states += 1
-                        level_entropy_this_step.append((lvl, ent_val))
-                    else:
-                        if debug_entropy and debug_lines_printed < debug_print_first:
-                            print(f"[ENTROPY-DBG] NaN after masking: lvl={lvl} feasible_count={feasible_count}")
-                else:
-                    # still need probs for sharpness stats
-                    probs_feas = log_probs[feasible_mask].exp()
+                feasible_count = int(feasible_mask.sum().item())
 
-                # Sharpness stats (only if >=2 feasible)
-                if feasible_count >= 2:
-                    sorted_probs, _ = torch.sort(probs_feas, descending=True)
-                    maxp = float(sorted_probs[0].detach().cpu())
-                    second = float(sorted_probs[1].detach().cpu())
-                    max_prob_sum_level[lvl] += maxp
-                    top2_gap_sum_level[lvl] += (maxp - second)
-                    multi_action_steps_level[lvl] += 1
-
-                if debug_entropy and debug_lines_printed < debug_print_first:
-                    # For debug display approximate entropy (safe)
-                    if feasible_count > 0:
-                        with torch.no_grad():
-                            ent_dbg = -(probs_feas * log_probs[feasible_mask]).sum().item()
-                    else:
-                        ent_dbg = 0.0
-                    print(f"[ENTROPY-DBG] lvl={lvl} feas={feasible_count} "
-                          f"maxp={(probs_feas.max().item() if feasible_count>0 else 0.0):.4f} ent={ent_dbg:.4f}")
-                    debug_lines_printed += 1
-
+                # Unconditional guard to avoid -inf gradient contamination
                 action = rec.history[cursor]
                 if action >= log_probs.shape[0]:
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
+                # UNCONDITIONAL FEASIBLE ACTION GUARD (prevent NaNs even if assert_masks is False)
+                if infeasible_mask[action]:
+                    raise RuntimeError(f"Chosen action {action} is masked infeasible (lvl={lvl}).")
+
                 chosen_logp = log_probs[action]
 
+                # Detached stats for logging
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
-                rec.length += 1
                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
 
-                contrib = -(rec.advantage / N) * chosen_logp
-                loss_batch = loss_batch + contrib
+                # Policy gradient contribution (cast to float32)
+                loss_batch = loss_batch - (rec.advantage / denom_policy) * chosen_logp.float()
 
+                # Always compute entropy metrics (even if entropy_coef==0) for visibility
+                if feasible_count > 1:
+                    lp_feas = log_probs[feasible_mask]
+                    p_feas = lp_feas.exp()
+                    H_raw = -(p_feas * lp_feas).sum()  # tensor
+                    if feasible_log_scaling:
+                        H_norm = H_raw / math.log(feasible_count)
+                    else:
+                        H_norm = H_raw
+
+                    H_raw_val = float(H_raw.detach().cpu())
+                    H_norm_val = float(H_norm.detach().cpu())
+                    sum_entropy_raw += H_raw_val
+                    sum_entropy_norm += H_norm_val
+                    per_level_entropy_norm_sum[lvl] += H_norm_val
+                    per_level_entropy_norm_count[lvl] += 1
+
+                    if entropy_coef > 0.0:
+                        loss_batch = loss_batch - entropy_coef * (H_norm.float() / denom_entropy)
+
+                    if debug_entropy and debug_lines_printed < debug_print_first:
+                        print(f"[ENTROPY-DBG] lvl={lvl} feas={feasible_count} "
+                              f"H_raw={H_raw_val:.4f} H_norm={H_norm_val:.4f} "
+                              f"action={action} logp={float(chosen_logp.detach().cpu()):.4f}")
+                        debug_lines_printed += 1
+                else:
+                    # Entropy = 0 in this state; still optionally debug
+                    if debug_entropy and debug_lines_printed < debug_print_first:
+                        print(f"[ENTROPY-DBG] lvl={lvl} feas={feasible_count} H_raw=0.0000 H_norm=0.0000 "
+                              f"action={action} logp={float(chosen_logp.detach().cpu()):.4f}")
+                        debug_lines_printed += 1
+
+                # Feasible count stats (includes states with K<=1)
+                per_level_feasible_sum[lvl] += feasible_count
+                per_level_feasible_count[lvl] += 1
+
+                # Advance environment clone
                 clone.take_action(action)
                 cursors[local_idx] += 1
                 if clone.synthesis_done or cursors[local_idx] >= len(rec.history):
                     finished[local_idx] = True
 
-            # Apply aggregated entropy for this forward step
-            if entropy_coef > 0.0 and step_entropy_states > 0 and math.isfinite(step_entropy_sum):
-                entropy_loss = torch.tensor((-entropy_coef / N) * step_entropy_sum,
-                                            device=device, dtype=loss_batch.dtype)
-                loss_batch = loss_batch + entropy_loss
-                entropy_total += step_entropy_sum
-                entropy_step_count += step_entropy_states
-                for lvl, ent_val in level_entropy_this_step:
-                    entropy_level_sums[lvl] += ent_val
-                    entropy_level_counts[lvl] += 1
-
+            # Backward micro-step
             if scaler is not None:
                 scaler.scale(loss_batch).backward()
             else:
                 loss_batch.backward()
 
-    clip_val = config.optimizer.get("gradient_clipping", 0)
+    # Optimizer step
+    clip_val = getattr(config, "optimizer", {}).get("gradient_clipping", 0) \
+        if hasattr(config, "optimizer") else 0
     if scaler is not None:
         if clip_val and clip_val > 0:
             scaler.unscale_(optimizer)
@@ -408,39 +338,69 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         optimizer.step()
 
-    policy_loss_value = -(1.0 / N) * sum_adv_logp
+    policy_loss_value = -(sum_adv_logp / denom_policy)
 
-    # Store entropy means
-    if entropy_step_count > 0:
-        config._last_entropy_mean = entropy_total / entropy_step_count
-    else:
-        config._last_entropy_mean = 0.0
+    # Metrics
+    mean_entropy_raw = (sum_entropy_raw / S_total) if S_total > 0 else 0.0
+    mean_entropy_norm = (sum_entropy_norm / S_total) if S_total > 0 else 0.0
+
+    per_level_entropy_norm_mean = {}
+    per_level_feasible_avg = {}
     for lvl in (0, 1, 2):
-        if entropy_level_counts[lvl] > 0:
-            setattr(config, f"_last_entropy_mean_level{lvl}",
-                    entropy_level_sums[lvl] / entropy_level_counts[lvl])
+        if per_level_entropy_norm_count[lvl] > 0:
+            per_level_entropy_norm_mean[lvl] = per_level_entropy_norm_sum[lvl] / per_level_entropy_norm_count[lvl]
         else:
-            setattr(config, f"_last_entropy_mean_level{lvl}", 0.0)
+            per_level_entropy_norm_mean[lvl] = 0.0
+        if per_level_feasible_count[lvl] > 0:
+            per_level_feasible_avg[lvl] = per_level_feasible_sum[lvl] / per_level_feasible_count[lvl]
+        else:
+            per_level_feasible_avg[lvl] = 0.0
 
-    # Persist debug stats
-    config._last_steps_level = steps_level
-    config._last_singleton_steps_level = singleton_steps_level
-    config._last_feasible_sum_level = feasible_sum_level
-    config._last_multi_action_steps_level = multi_action_steps_level
-    config._last_max_prob_sum_level = max_prob_sum_level
-    config._last_top2_gap_sum_level = top2_gap_sum_level
+    # Store for external use
+    config._last_entropy_norm_mean = mean_entropy_norm
+    config._last_entropy_raw_mean = mean_entropy_raw
+    for lvl in (0, 1, 2):
+        setattr(config, f"_last_entropy_norm_mean_level{lvl}", per_level_entropy_norm_mean[lvl])
+        setattr(config, f"_last_avg_feasible_count_level{lvl}", per_level_feasible_avg[lvl])
 
-    return policy_loss_value
+    return {
+        "policy_loss_value": float(policy_loss_value),
+        "mean_entropy_norm": float(mean_entropy_norm),
+        "mean_entropy_raw": float(mean_entropy_raw),
+        "per_level_entropy_norm": per_level_entropy_norm_mean,
+        "per_level_avg_feasible": per_level_feasible_avg,
+        "total_states": S_total
+    }
 
 
-def compute_policy_loss_for_logging(records: List[TrajectoryRecord]) -> float:
+# ------------------ Logging Helper ------------------ #
+
+def compute_policy_loss_for_logging(records: List[TrajectoryRecord], config) -> float:
+    """
+    Recompute detached policy loss consistent with normalization flag:
+      If length-normalized: -(Σ_i A_i Σ_t logp_i,t) / S_total
+      Else:                  -(1/N) Σ_i A_i Σ_t logp_i,t
+    """
     if not records:
         return 0.0
-    with torch.no_grad():
-        log_probs = torch.stack([r.log_prob_sum for r in records])
-        adv = torch.tensor([r.advantage for r in records], device=log_probs.device, dtype=log_probs.dtype)
-        return float(-(adv * log_probs).mean().item())
+    length_norm = bool(getattr(config, "rl_entropy_length_normalize", True))
+    N = len(records)
+    S_total = sum(len(r.history) for r in records)
+    denom = S_total if length_norm else N
 
+    adv_tensor = torch.tensor([r.advantage for r in records], dtype=torch.float32)
+    weighted_terms = []
+    for r, adv in zip(records, adv_tensor):
+        if r.log_prob_sum is None:
+            continue
+        weighted_terms.append(adv * r.log_prob_sum.detach().cpu().float())
+    if not weighted_terms:
+        return 0.0
+    total = torch.stack(weighted_terms).sum().item()
+    return float(-(total / denom))
+
+
+# ------------------ Main Update Entry ------------------ #
 
 def dr_grpo_update(model: MoleculeTransformer,
                    optimizer: torch.optim.Optimizer,
@@ -466,88 +426,16 @@ def dr_grpo_update(model: MoleculeTransformer,
     normalize_adv = getattr(config, "rl_advantage_normalize", False)
     baseline = compute_baseline_and_advantages(records, normalize=normalize_adv, config=config)
 
-    use_streaming = getattr(config, "rl_streaming_backward", False)
-
-    if use_streaming:
-        autocast_ctx, scaler = _make_autocast_ctx(config)
-        policy_loss_val = streaming_replay_and_backward(
-            model, optimizer, records, config, device, autocast_ctx, scaler
-        )
-        replay_mode = "streaming"
-    else:
-        # Entropy instrumentation only implemented for streaming path
-        assert_masks = getattr(config, "rl_assert_masks", False)
-        autocast_ctx, scaler = _make_autocast_ctx(config)
-        use_batched = getattr(config, "rl_batched_replay", True) and len(records) > 1
-        if use_batched:
-            batched_replay_and_compute_log_probs(model, records, device, autocast_ctx, assert_masks=assert_masks)
-        else:
-            sequential_replay_and_compute_log_probs(model, records, device, autocast_ctx, assert_masks=assert_masks)
-        log_probs = torch.stack([r.log_prob_sum for r in records])
-        advantages = torch.tensor([r.advantage for r in records], dtype=log_probs.dtype, device=log_probs.device)
-        loss = -(advantages * log_probs).mean()
-        optimizer.zero_grad()
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            clip_val = config.optimizer.get("gradient_clipping", 0)
-            if clip_val and clip_val > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            clip_val = config.optimizer.get("gradient_clipping", 0)
-            if clip_val and clip_val > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-            optimizer.step()
-        policy_loss_val = float(loss.item())
-        replay_mode = "batched" if use_batched else "sequential"
+    update_stats = _streaming_update_normalized(model, optimizer, records, config, device)
 
     rewards = [r.reward for r in records]
-    advantages = [r.advantage for r in records]
+    advantages_vals = [r.advantage for r in records]
     mean_reward = sum(rewards) / len(rewards)
-    mean_adv = sum(advantages) / len(advantages)
-    std_adv = (sum((a - mean_adv) ** 2 for a in advantages) / len(advantages)) ** 0.5 if advantages else 0.0
+    mean_adv = sum(advantages_vals) / len(advantages_vals)
+    std_adv = (sum((a - mean_adv) ** 2 for a in advantages_vals) / len(advantages_vals)) ** 0.5 if advantages_vals else 0.0
 
-    entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0))
-    mean_step_entropy = float(getattr(config, "_last_entropy_mean", 0.0))
-    mean_entropy_level0 = float(getattr(config, "_last_entropy_mean_level0", 0.0))
-    mean_entropy_level1 = float(getattr(config, "_last_entropy_mean_level1", 0.0))
-    mean_entropy_level2 = float(getattr(config, "_last_entropy_mean_level2", 0.0))
-
-    # Improvement-triggered entropy decay
-    if entropy_coef > 0.0:
-        best_reward = max(rewards)
-        if not hasattr(config, "_entropy_base_best_reward"):
-            config._entropy_base_best_reward = best_reward
-            config._entropy_decays_done = 0
-        delta_target = float(getattr(config, "rl_entropy_improvement_delta", 0.02))
-        decay_factor = float(getattr(config, "rl_entropy_decay_factor", 0.7))
-        min_coef = float(getattr(config, "rl_entropy_min_coef", 0.001))
-        decays_done = int(getattr(config, "_entropy_decays_done", 0))
-        improvement = best_reward - config._entropy_base_best_reward
-        needed = (decays_done + 1) * delta_target
-        if improvement >= needed and entropy_coef > min_coef:
-            new_coef = max(min_coef, entropy_coef * decay_factor)
-            setattr(config, "rl_entropy_coef", new_coef)
-            config._entropy_decays_done = decays_done + 1
-            config._entropy_last_decay_at_reward = best_reward
-        else:
-            new_coef = entropy_coef
-    else:
-        new_coef = entropy_coef
-
-    # Extract debug stats
-    steps_level_dbg = getattr(config, "_last_steps_level", {0: 0, 1: 0, 2: 0})
-    singleton_steps_level_dbg = getattr(config, "_last_singleton_steps_level", {0: 0, 1: 0, 2: 0})
-    feasible_sum_level_dbg = getattr(config, "_last_feasible_sum_level", {0: 0, 1: 0, 2: 0})
-    multi_action_steps_level_dbg = getattr(config, "_last_multi_action_steps_level", {0: 0, 1: 0, 2: 0})
-    max_prob_sum_level_dbg = getattr(config, "_last_max_prob_sum_level", {0: 0.0, 1: 0.0, 2: 0.0})
-    top2_gap_sum_level_dbg = getattr(config, "_last_top2_gap_sum_level", {0: 0.0, 1: 0.0, 2: 0.0})
-
-    def safe_div(a, b):
-        return a / b if b else 0.0
+    entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0) or 0.0)
+    policy_loss_logged = update_stats["policy_loss_value"]
 
     metrics = {
         "baseline": baseline,
@@ -557,42 +445,27 @@ def dr_grpo_update(model: MoleculeTransformer,
         "best_reward": float(max(rewards)),
         "mean_advantage": float(mean_adv),
         "std_advantage": float(std_adv),
-        "fraction_pos_adv": float(sum(a > 0 for a in advantages) / len(advantages)),
-        "policy_loss": float(policy_loss_val),
+        "fraction_pos_adv": float(sum(a > 0 for a in advantages_vals) / len(advantages_vals)),
+        "policy_loss": float(policy_loss_logged),
         "num_trajectories": len(records),
         "mean_traj_length": float(sum(r.length for r in records) / len(records)) if records else 0.0,
-        "replay_mode": replay_mode,
-        "invalid_dropped": int(sum(not math.isfinite(r.reward) for r in records)),
-        "none_dropped": 0,
+        "invalid_dropped": nonfinite_dropped,
+        "none_dropped": none_dropped,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
         "amp_dtype": getattr(config, "amp_dtype", "none"),
         "adv_norm": bool(normalize_adv),
         "entropy_coef": float(entropy_coef),
-        "entropy_coef_next": float(new_coef),
-        "mean_step_entropy": mean_step_entropy,
-        "mean_entropy_level0": mean_entropy_level0,
-        "mean_entropy_level1": mean_entropy_level1,
-        "mean_entropy_level2": mean_entropy_level2,
-        "entropy_decays_done": int(getattr(config, "_entropy_decays_done", 0)),
-        # Per-level visit & feasibility stats
-        "steps_level0": steps_level_dbg.get(0, 0),
-        "steps_level1": steps_level_dbg.get(1, 0),
-        "steps_level2": steps_level_dbg.get(2, 0),
-        "singleton_steps_level0": singleton_steps_level_dbg.get(0, 0),
-        "singleton_steps_level1": singleton_steps_level_dbg.get(1, 0),
-        "singleton_steps_level2": singleton_steps_level_dbg.get(2, 0),
-        "avg_feasible_actions_level0": safe_div(feasible_sum_level_dbg.get(0, 0), steps_level_dbg.get(0, 0)),
-        "avg_feasible_actions_level1": safe_div(feasible_sum_level_dbg.get(1, 0), steps_level_dbg.get(1, 0)),
-        "avg_feasible_actions_level2": safe_div(feasible_sum_level_dbg.get(2, 0), steps_level_dbg.get(2, 0)),
-        "multi_action_steps_level0": multi_action_steps_level_dbg.get(0, 0),
-        "multi_action_steps_level1": multi_action_steps_level_dbg.get(1, 0),
-        "multi_action_steps_level2": multi_action_steps_level_dbg.get(2, 0),
-        "mean_max_prob_level0": safe_div(max_prob_sum_level_dbg.get(0, 0.0), multi_action_steps_level_dbg.get(0, 0)),
-        "mean_max_prob_level1": safe_div(max_prob_sum_level_dbg.get(1, 0.0), multi_action_steps_level_dbg.get(1, 0)),
-        "mean_max_prob_level2": safe_div(max_prob_sum_level_dbg.get(2, 0.0), multi_action_steps_level_dbg.get(2, 0)),
-        "mean_top2_gap_level0": safe_div(top2_gap_sum_level_dbg.get(0, 0.0), multi_action_steps_level_dbg.get(0, 0)),
-        "mean_top2_gap_level1": safe_div(top2_gap_sum_level_dbg.get(1, 0.0), multi_action_steps_level_dbg.get(1, 0)),
-        "mean_top2_gap_level2": safe_div(top2_gap_sum_level_dbg.get(2, 0.0), multi_action_steps_level_dbg.get(2, 0)),
+        "mean_entropy_norm": float(update_stats["mean_entropy_norm"]),
+        "mean_entropy_raw": float(update_stats["mean_entropy_raw"]),
+        "mean_entropy_norm_level0": float(update_stats["per_level_entropy_norm"][0]),
+        "mean_entropy_norm_level1": float(update_stats["per_level_entropy_norm"][1]),
+        "mean_entropy_norm_level2": float(update_stats["per_level_entropy_norm"][2]),
+        "avg_feasible_count_level0": float(update_stats["per_level_avg_feasible"][0]),
+        "avg_feasible_count_level1": float(update_stats["per_level_avg_feasible"][1]),
+        "avg_feasible_count_level2": float(update_stats["per_level_avg_feasible"][2]),
+        "total_states": int(update_stats["total_states"]),
+        "length_normalized": bool(getattr(config, "rl_entropy_length_normalize", True)),
+        "feasible_log_scaling": bool(getattr(config, "rl_entropy_use_feasible_log_scaling", True)),
     }
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")

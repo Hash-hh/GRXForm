@@ -131,39 +131,43 @@ class MoleculeConfig:
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
 
-        # Dr. GRPO / RL fine-tuning additions
-        self.use_dr_grpo = True  # Switch to enable RL instead of supervised imitation
-        self.rl_batched_replay = True # Fallback path (ignored if streaming enabled)
-        self.rl_recompute_log_probs = True  # Always True for V1 (post-hoc REINFORCE)
-        self.rl_entropy_coef = 0.0  # No entropy bonus for V1
-        self.rl_store_trajectories_path = None  # Optional: path to pickle the last epoch's trajectories for debugging
-        self.rl_max_group_size = None  # Optional cap (None = disabled)
-        self.rl_log_advantages = False  # Log advantage stats
-        self.rl_checkpoint_every = 1  # Save every N RL epochs
+        # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
-        self.rl_soft_replay_failure = False  # If True, drop and recompute baseline; else raise
-        self.rl_assert_masks = False  # Enable mask + logits structural assertions
-        self.rl_advantage_normalize = False  # Normalize (reward-baseline)/std
+        self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.freeze_all_except_final_layer = False  # If True, only the final linear layer is fine-tuned
+        # Core RL control
+        self.rl_entropy_coef = 0.05  # Fixed entropy coefficient (tune: 0.04–0.06 typical after normalization)
+        self.rl_entropy_length_normalize = True  # Normalize policy & entropy losses by total decision states S_total
+        self.rl_entropy_use_feasible_log_scaling = True  # Divide per-state entropy by log(feasible_count); disables with False
+        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
-        # Safety / diagnostics
-        self.rl_debug_verify_replay = False  # If True, re-generate a SMILES (if available) before and after replay step to assert equality
-
-        self.rl_streaming_backward = True  # Enable streaming per-step backward
-        self.rl_replay_microbatch_size = 64  # Microbatch size for streaming (0 or None => all)
-
-        self.rl_entropy_coef = 0.005
-        self.rl_entropy_improvement_delta = 0.02
-        self.rl_entropy_decay_factor = 0.7
-        self.rl_entropy_min_coef = 0.001
+        # Advantage / baseline
         self.rl_use_ema_baseline = True
         self.rl_baseline_ema_alpha = 0.9
+        self.rl_advantage_normalize = False  # (Optional) Normalize trajectory advantages; leave False unless reward scale drifts
 
-        # Add inside MoleculeConfig.__init__ (anywhere after existing RL flags)
-        self.use_amp = True  # Enable AMP for RL fine-tuning
-        self.amp_dtype = "bf16"  # "bf16" (preferred on A100/H100) or "fp16"
-        self.use_amp_inference = True  # Optional: use autocast during generation/search (no gradients)
+        # Trajectory / logging options
+        self.rl_store_trajectories_path = None  # Optional: path to pickle recent trajectories
+        self.rl_max_group_size = None  # Optional cap on trajectories per update
+        self.rl_log_advantages = False  # If True, add detailed advantage stats to logs
+        self.rl_checkpoint_every = 1  # Save checkpoint every N RL epochs
 
-        self.rl_debug_entropy = False
-        self.rl_debug_entropy_print_first = 500
+        # Structural / safety
+        self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
+        self.rl_soft_replay_failure = False  # Keep False unless you want soft handling of rare failures
+        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
+
+        # Debug / diagnostics
+        self.rl_debug_verify_replay = False  # Re-generate design pre/post replay to verify determinism (costly)
+        self.rl_debug_entropy = False  # Print per-state entropy debug lines
+        self.rl_debug_entropy_print_first = 500  # Max number of entropy debug lines
+
+        # Mixed precision
+        self.use_amp = True
+        self.amp_dtype = "bf16"  # "bf16" preferred on modern NVIDIA GPUs; "fp16" if needed
+        self.use_amp_inference = True  # Also use autocast during rollout generation
+
+        # (Removed legacy fields):
+        #   rl_batched_replay, rl_streaming_backward,
+        #   rl_entropy_improvement_delta, rl_entropy_decay_factor, rl_entropy_min_coef,
+        #   rl_recompute_log_probs (not needed for the streaming baseline; add back only if you implement post-hoc replay)
