@@ -116,7 +116,7 @@ class MoleculeConfig:
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
             "nucleus_top_p": 1.,
-            "max_leaves_per_root": 300,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
+            "max_leaves_per_root": 250,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
             "pin_workers_to_core": False,
 
             "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
@@ -164,3 +164,6 @@ class MoleculeConfig:
         self.use_amp = True  # Enable AMP for RL fine-tuning
         self.amp_dtype = "bf16"  # "bf16" (preferred on A100/H100) or "fp16"
         self.use_amp_inference = True  # Optional: use autocast during generation/search (no gradients)
+
+        self.rl_debug_entropy = False
+        self.rl_debug_entropy_print_first = 500

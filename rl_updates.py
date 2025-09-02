@@ -57,15 +57,13 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
     use_ema = bool(getattr(config, "rl_use_ema_baseline", False)) if config is not None else False
     if use_ema:
         alpha = float(getattr(config, "rl_baseline_ema_alpha", 0.9))
-        # Initialize EMA on first use
         if not hasattr(config, "_ema_baseline"):
             config._ema_baseline = batch_mean
             config._ema_initialized = True
-        baseline = float(config._ema_baseline)  # use current EMA as baseline
-        # Update EMA for NEXT round
+        baseline = float(config._ema_baseline)
         config._ema_baseline = alpha * config._ema_baseline + (1.0 - alpha) * batch_mean
-        # Store batch_mean separately for logging
-        config._last_batch_mean_reward = batch_mean
+        if config is not None:
+            config._last_batch_mean_reward = batch_mean
     else:
         baseline = batch_mean
         if config is not None:
@@ -123,7 +121,7 @@ def _make_autocast_ctx(config):
     return ctx, scaler
 
 
-# --------- (OLD non-streaming replay functions retained for fallback) ---------
+# --------- (OLD fallback replay functions) ---------
 def sequential_replay_and_compute_log_probs(
         model: MoleculeTransformer,
         records: List[TrajectoryRecord],
@@ -219,7 +217,7 @@ def batched_replay_and_compute_log_probs(
         rec.length = lengths[i]
 
 
-# --------- STREAMING BACKWARD (FIXED + ENTROPY) ---------
+# --------- STREAMING BACKWARD (with entropy + instrumentation FIXED) ---------
 def streaming_replay_and_backward(model: MoleculeTransformer,
                                   optimizer: torch.optim.Optimizer,
                                   records: List[TrajectoryRecord],
@@ -229,9 +227,9 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                                   scaler):
     """
     Streaming (per-step) backward with microbatching.
-    Adds entropy regularization:
-      Loss = -(1/N) * Σ_i A_i Σ_t log π(a_{i,t}|s_{i,t}) - (β / N) * Σ_{i,t} H(π(·|s_{i,t}))
-    where β = rl_entropy_coef.
+    Entropy regularization (only over feasible actions to avoid NaNs):
+      Loss = -(1/N) Σ_i A_i Σ_t log π(a_{i,t}|s_{i,t}) - (β / N) Σ_{i,t} H_feasible(s_{i,t})
+    where H_feasible excludes masked actions.
     """
     model.eval()
     assert all(r.advantage is not None for r in records), "Compute advantages first."
@@ -239,7 +237,6 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
     if N == 0:
         return 0.0
 
-    # Initialize per-trajectory bookkeeping
     for rec in records:
         rec.log_prob_sum = torch.tensor(0.0, device=device)
         rec.length = 0
@@ -250,14 +247,29 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
     assert micro > 0, "Microbatch size must be > 0"
 
     entropy_coef = float(getattr(config, "rl_entropy_coef", 0.0) or 0.0)
+    debug_entropy = bool(getattr(config, "rl_debug_entropy", False))
+    debug_print_first = int(getattr(config, "rl_debug_entropy_print_first", 10))
 
-    # Logging accumulators
+    # Policy / entropy accumulators
     sum_adv_logp = 0.0
     entropy_total = 0.0
-    entropy_step_count = 0
-    # Per-level entropy logging
+    entropy_step_count = 0  # counts states where entropy computed (feasible_count >=1)
+
+    # Per-level entropy sums & counts
     entropy_level_sums = {0: 0.0, 1: 0.0, 2: 0.0}
     entropy_level_counts = {0: 0, 1: 0, 2: 0}
+
+    # Per-level feasible action stats
+    steps_level = {0: 0, 1: 0, 2: 0}
+    singleton_steps_level = {0: 0, 1: 0, 2: 0}
+    feasible_sum_level = {0: 0, 1: 0, 2: 0}
+
+    # Probability sharpness stats (only for steps with >=2 feasible)
+    max_prob_sum_level = {0: 0.0, 1: 0.0, 2: 0.0}
+    top2_gap_sum_level = {0: 0.0, 1: 0.0, 2: 0.0}
+    multi_action_steps_level = {0: 0, 1: 0, 2: 0}
+
+    debug_lines_printed = 0
 
     for start in range(0, N, micro):
         batch_records = records[start:start + micro]
@@ -277,10 +289,9 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             with autocast_ctx:
                 head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
 
-            # Scalar tensor accumulator keeping graph (fixes previous fp16 bug)
             loss_batch = torch.zeros((), device=device, dtype=head0.dtype)
-
-            step_entropy_sum = 0.0  # numerical accumulation for logging
+            step_entropy_sum = 0.0
+            step_entropy_states = 0  # number of feasible states contributing (for gating)
             level_entropy_this_step = []
 
             for pos_in_active, local_idx in enumerate(active_local_indices):
@@ -296,21 +307,67 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 else:
                     level_logits = head2[pos_in_active]
 
+                # Build mask tensor to inspect feasible count
+                mask_list = clone.current_action_mask
+                if isinstance(mask_list, torch.Tensor):
+                    infeasible_mask = mask_list.to(device=device, dtype=torch.bool)
+                else:
+                    infeasible_mask = torch.tensor(mask_list, dtype=torch.bool, device=device)
+
+                feasible_mask = ~infeasible_mask
+                feasible_count = feasible_mask.sum().item()
+                steps_level[lvl] += 1
+                feasible_sum_level[lvl] += feasible_count
+                if feasible_count == 1:
+                    singleton_steps_level[lvl] += 1
+
                 log_probs = _prepare_masked_log_probs(
-                    level_logits, clone.current_action_mask, device,
+                    level_logits, infeasible_mask, device,
                     assert_masks=getattr(config, "rl_assert_masks", False)
                 )
-                if entropy_coef > 0.0:
-                    probs = log_probs.exp()
-                    ent = -(probs * log_probs).sum()  # differentiable
-                    step_entropy_sum += float(ent.detach().cpu())
-                    level_entropy_this_step.append((lvl, float(ent.detach().cpu())))
-                    # Entropy term added AFTER loop (aggregated)
+
+                # Compute entropy ONLY over feasible actions to avoid 0 * -inf = NaN
+                if entropy_coef > 0.0 and feasible_count > 0:
+                    log_probs_feas = log_probs[feasible_mask]
+                    probs_feas = log_probs_feas.exp()
+                    ent = -(probs_feas * log_probs_feas).sum()
+                    if torch.isfinite(ent):
+                        ent_val = float(ent.detach().cpu())
+                        step_entropy_sum += ent_val
+                        step_entropy_states += 1
+                        level_entropy_this_step.append((lvl, ent_val))
+                    else:
+                        if debug_entropy and debug_lines_printed < debug_print_first:
+                            print(f"[ENTROPY-DBG] NaN after masking: lvl={lvl} feasible_count={feasible_count}")
+                else:
+                    # still need probs for sharpness stats
+                    probs_feas = log_probs[feasible_mask].exp()
+
+                # Sharpness stats (only if >=2 feasible)
+                if feasible_count >= 2:
+                    sorted_probs, _ = torch.sort(probs_feas, descending=True)
+                    maxp = float(sorted_probs[0].detach().cpu())
+                    second = float(sorted_probs[1].detach().cpu())
+                    max_prob_sum_level[lvl] += maxp
+                    top2_gap_sum_level[lvl] += (maxp - second)
+                    multi_action_steps_level[lvl] += 1
+
+                if debug_entropy and debug_lines_printed < debug_print_first:
+                    # For debug display approximate entropy (safe)
+                    if feasible_count > 0:
+                        with torch.no_grad():
+                            ent_dbg = -(probs_feas * log_probs[feasible_mask]).sum().item()
+                    else:
+                        ent_dbg = 0.0
+                    print(f"[ENTROPY-DBG] lvl={lvl} feas={feasible_count} "
+                          f"maxp={(probs_feas.max().item() if feasible_count>0 else 0.0):.4f} ent={ent_dbg:.4f}")
+                    debug_lines_printed += 1
+
                 action = rec.history[cursor]
                 if action >= log_probs.shape[0]:
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
-
                 chosen_logp = log_probs[action]
+
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
                 rec.length += 1
                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
@@ -323,26 +380,22 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 if clone.synthesis_done or cursors[local_idx] >= len(rec.history):
                     finished[local_idx] = True
 
-            # Apply aggregated entropy term once per replay step
-            if entropy_coef > 0.0 and step_entropy_sum > 0.0:
-                # Loss term: -(entropy_coef / N) * sum_{active states} H
+            # Apply aggregated entropy for this forward step
+            if entropy_coef > 0.0 and step_entropy_states > 0 and math.isfinite(step_entropy_sum):
                 entropy_loss = torch.tensor((-entropy_coef / N) * step_entropy_sum,
                                             device=device, dtype=loss_batch.dtype)
                 loss_batch = loss_batch + entropy_loss
                 entropy_total += step_entropy_sum
-                entropy_step_count += len(active_local_indices)
-                # Update per-level logs
+                entropy_step_count += step_entropy_states
                 for lvl, ent_val in level_entropy_this_step:
                     entropy_level_sums[lvl] += ent_val
                     entropy_level_counts[lvl] += 1
 
-            # Single backward
             if scaler is not None:
                 scaler.scale(loss_batch).backward()
             else:
                 loss_batch.backward()
 
-    # Optimizer step
     clip_val = config.optimizer.get("gradient_clipping", 0)
     if scaler is not None:
         if clip_val and clip_val > 0:
@@ -357,7 +410,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
     policy_loss_value = -(1.0 / N) * sum_adv_logp
 
-    # Store logging stats in config (so dr_grpo_update can pick them up)
+    # Store entropy means
     if entropy_step_count > 0:
         config._last_entropy_mean = entropy_total / entropy_step_count
     else:
@@ -368,6 +421,14 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                     entropy_level_sums[lvl] / entropy_level_counts[lvl])
         else:
             setattr(config, f"_last_entropy_mean_level{lvl}", 0.0)
+
+    # Persist debug stats
+    config._last_steps_level = steps_level
+    config._last_singleton_steps_level = singleton_steps_level
+    config._last_feasible_sum_level = feasible_sum_level
+    config._last_multi_action_steps_level = multi_action_steps_level
+    config._last_max_prob_sum_level = max_prob_sum_level
+    config._last_top2_gap_sum_level = top2_gap_sum_level
 
     return policy_loss_value
 
@@ -414,7 +475,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         )
         replay_mode = "streaming"
     else:
-        # Fallback (entropy not applied here yet)
+        # Entropy instrumentation only implemented for streaming path
         assert_masks = getattr(config, "rl_assert_masks", False)
         autocast_ctx, scaler = _make_autocast_ctx(config)
         use_batched = getattr(config, "rl_batched_replay", True) and len(records) > 1
@@ -422,35 +483,9 @@ def dr_grpo_update(model: MoleculeTransformer,
             batched_replay_and_compute_log_probs(model, records, device, autocast_ctx, assert_masks=assert_masks)
         else:
             sequential_replay_and_compute_log_probs(model, records, device, autocast_ctx, assert_masks=assert_masks)
-
         log_probs = torch.stack([r.log_prob_sum for r in records])
         advantages = torch.tensor([r.advantage for r in records], dtype=log_probs.dtype, device=log_probs.device)
         loss = -(advantages * log_probs).mean()
-
-        if not torch.isfinite(loss):
-            if logger:
-                logger.warning("[DR-GRPO] Non-finite loss; skipping step.")
-            metrics = {
-                "baseline": baseline,
-                "mean_reward": float(sum(r.reward for r in records) / len(records)),
-                "best_reward": float(max(r.reward for r in records)),
-                "mean_advantage": float(sum(r.advantage for r in records) / len(records)),
-                "std_advantage": 0.0,
-                "fraction_pos_adv": float(sum(r.advantage > 0 for r in records) / len(records)),
-                "policy_loss": float("nan"),
-                "num_trajectories": len(records),
-                "mean_traj_length": float(sum(r.length for r in records) / len(records)),
-                "replay_mode": "batched" if use_batched else "sequential",
-                "invalid_dropped": nonfinite_dropped,
-                "none_dropped": none_dropped,
-                "amp_enabled": bool(getattr(config, "use_amp", False)),
-                "amp_dtype": getattr(config, "amp_dtype", "none"),
-                "adv_norm": bool(normalize_adv),
-                "entropy_coef": float(getattr(config, "rl_entropy_coef", 0.0)),
-                "mean_step_entropy": 0.0
-            }
-            return metrics
-
         optimizer.zero_grad()
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -466,7 +501,6 @@ def dr_grpo_update(model: MoleculeTransformer,
             if clip_val and clip_val > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
             optimizer.step()
-
         policy_loss_val = float(loss.item())
         replay_mode = "batched" if use_batched else "sequential"
 
@@ -482,7 +516,7 @@ def dr_grpo_update(model: MoleculeTransformer,
     mean_entropy_level1 = float(getattr(config, "_last_entropy_mean_level1", 0.0))
     mean_entropy_level2 = float(getattr(config, "_last_entropy_mean_level2", 0.0))
 
-    # Improvement-triggered entropy decay (applies to NEXT epoch)
+    # Improvement-triggered entropy decay
     if entropy_coef > 0.0:
         best_reward = max(rewards)
         if not hasattr(config, "_entropy_base_best_reward"):
@@ -504,6 +538,17 @@ def dr_grpo_update(model: MoleculeTransformer,
     else:
         new_coef = entropy_coef
 
+    # Extract debug stats
+    steps_level_dbg = getattr(config, "_last_steps_level", {0: 0, 1: 0, 2: 0})
+    singleton_steps_level_dbg = getattr(config, "_last_singleton_steps_level", {0: 0, 1: 0, 2: 0})
+    feasible_sum_level_dbg = getattr(config, "_last_feasible_sum_level", {0: 0, 1: 0, 2: 0})
+    multi_action_steps_level_dbg = getattr(config, "_last_multi_action_steps_level", {0: 0, 1: 0, 2: 0})
+    max_prob_sum_level_dbg = getattr(config, "_last_max_prob_sum_level", {0: 0.0, 1: 0.0, 2: 0.0})
+    top2_gap_sum_level_dbg = getattr(config, "_last_top2_gap_sum_level", {0: 0.0, 1: 0.0, 2: 0.0})
+
+    def safe_div(a, b):
+        return a / b if b else 0.0
+
     metrics = {
         "baseline": baseline,
         "batch_mean_reward": float(getattr(config, "_last_batch_mean_reward", baseline)),
@@ -517,8 +562,8 @@ def dr_grpo_update(model: MoleculeTransformer,
         "num_trajectories": len(records),
         "mean_traj_length": float(sum(r.length for r in records) / len(records)) if records else 0.0,
         "replay_mode": replay_mode,
-        "invalid_dropped": nonfinite_dropped,
-        "none_dropped": none_dropped,
+        "invalid_dropped": int(sum(not math.isfinite(r.reward) for r in records)),
+        "none_dropped": 0,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
         "amp_dtype": getattr(config, "amp_dtype", "none"),
         "adv_norm": bool(normalize_adv),
@@ -528,7 +573,26 @@ def dr_grpo_update(model: MoleculeTransformer,
         "mean_entropy_level0": mean_entropy_level0,
         "mean_entropy_level1": mean_entropy_level1,
         "mean_entropy_level2": mean_entropy_level2,
-        "entropy_decays_done": int(getattr(config, "_entropy_decays_done", 0))
+        "entropy_decays_done": int(getattr(config, "_entropy_decays_done", 0)),
+        # Per-level visit & feasibility stats
+        "steps_level0": steps_level_dbg.get(0, 0),
+        "steps_level1": steps_level_dbg.get(1, 0),
+        "steps_level2": steps_level_dbg.get(2, 0),
+        "singleton_steps_level0": singleton_steps_level_dbg.get(0, 0),
+        "singleton_steps_level1": singleton_steps_level_dbg.get(1, 0),
+        "singleton_steps_level2": singleton_steps_level_dbg.get(2, 0),
+        "avg_feasible_actions_level0": safe_div(feasible_sum_level_dbg.get(0, 0), steps_level_dbg.get(0, 0)),
+        "avg_feasible_actions_level1": safe_div(feasible_sum_level_dbg.get(1, 0), steps_level_dbg.get(1, 0)),
+        "avg_feasible_actions_level2": safe_div(feasible_sum_level_dbg.get(2, 0), steps_level_dbg.get(2, 0)),
+        "multi_action_steps_level0": multi_action_steps_level_dbg.get(0, 0),
+        "multi_action_steps_level1": multi_action_steps_level_dbg.get(1, 0),
+        "multi_action_steps_level2": multi_action_steps_level_dbg.get(2, 0),
+        "mean_max_prob_level0": safe_div(max_prob_sum_level_dbg.get(0, 0.0), multi_action_steps_level_dbg.get(0, 0)),
+        "mean_max_prob_level1": safe_div(max_prob_sum_level_dbg.get(1, 0.0), multi_action_steps_level_dbg.get(1, 0)),
+        "mean_max_prob_level2": safe_div(max_prob_sum_level_dbg.get(2, 0.0), multi_action_steps_level_dbg.get(2, 0)),
+        "mean_top2_gap_level0": safe_div(top2_gap_sum_level_dbg.get(0, 0.0), multi_action_steps_level_dbg.get(0, 0)),
+        "mean_top2_gap_level1": safe_div(top2_gap_sum_level_dbg.get(1, 0.0), multi_action_steps_level_dbg.get(1, 0)),
+        "mean_top2_gap_level2": safe_div(top2_gap_sum_level_dbg.get(2, 0.0), multi_action_steps_level_dbg.get(2, 0)),
     }
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
