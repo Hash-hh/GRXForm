@@ -192,7 +192,6 @@ def _streaming_update_normalized(
     debug_print_first = int(getattr(config, "rl_debug_entropy_print_first", 12)) \
         if hasattr(config, "rl_debug_entropy_print_first") else 12
 
-    # Optional one-time reminder when entropy disabled but metrics computed
     if entropy_coef == 0.0 and debug_entropy and not hasattr(config, "_warned_entropy_off"):
         print("[ENTROPY] entropy_coef=0.0: metrics still computed (no gradient contribution).")
         config._warned_entropy_off = True
@@ -200,8 +199,9 @@ def _streaming_update_normalized(
     denom_policy = S_total if length_norm else N
     denom_entropy = S_total if length_norm else N
 
-    # Float32 accumulators (more stable under AMP)
-    sum_adv_logp = 0.0
+    # Float32 accumulators
+    # CHANGED: sum_adv_logp is now a device tensor to avoid per-step CPU sync
+    sum_adv_logp = torch.zeros((), device=device, dtype=torch.float32)
     sum_entropy_raw = 0.0
     sum_entropy_norm = 0.0
 
@@ -215,7 +215,7 @@ def _streaming_update_normalized(
     micro = getattr(config, "rl_replay_microbatch_size", 0) or N
     assert micro > 0, "Microbatch size must be > 0"
 
-    model.eval()  # deterministic logits (dropout=0 anyway)
+    model.eval()
     autocast_ctx, scaler = _make_autocast_ctx(config)
     optimizer.zero_grad(set_to_none=True)
 
@@ -237,7 +237,6 @@ def _streaming_update_normalized(
             with autocast_ctx:
                 head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
 
-            # Keep loss_batch in float32 for stability
             loss_batch = torch.zeros((), device=device, dtype=torch.float32)
 
             for pos_in_active, local_idx in enumerate(active_local_indices):
@@ -259,28 +258,27 @@ def _streaming_update_normalized(
 
                 feasible_count = int(feasible_mask.sum().item())
 
-                # Unconditional guard to avoid -inf gradient contamination
                 action = rec.history[cursor]
                 if action >= log_probs.shape[0]:
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
-                # UNCONDITIONAL FEASIBLE ACTION GUARD (prevent NaNs even if assert_masks is False)
                 if infeasible_mask[action]:
                     raise RuntimeError(f"Chosen action {action} is masked infeasible (lvl={lvl}).")
 
                 chosen_logp = log_probs[action]
 
-                # Detached stats for logging
+                # Detached stats
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
-                sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
+                # CHANGED: accumulate on device (avoid .cpu())
+                sum_adv_logp = sum_adv_logp + rec.advantage * chosen_logp.detach().float()
 
-                # Policy gradient contribution (cast to float32)
+                # Policy gradient contribution
                 loss_batch = loss_batch - (rec.advantage / denom_policy) * chosen_logp.float()
 
-                # Always compute entropy metrics (even if entropy_coef==0) for visibility
+                # Entropy metrics
                 if feasible_count > 1:
                     lp_feas = log_probs[feasible_mask]
                     p_feas = lp_feas.exp()
-                    H_raw = -(p_feas * lp_feas).sum()  # tensor
+                    H_raw = -(p_feas * lp_feas).sum()
                     if feasible_log_scaling:
                         H_norm = H_raw / math.log(feasible_count)
                     else:
@@ -302,29 +300,24 @@ def _streaming_update_normalized(
                               f"action={action} logp={float(chosen_logp.detach().cpu()):.4f}")
                         debug_lines_printed += 1
                 else:
-                    # Entropy = 0 in this state; still optionally debug
                     if debug_entropy and debug_lines_printed < debug_print_first:
                         print(f"[ENTROPY-DBG] lvl={lvl} feas={feasible_count} H_raw=0.0000 H_norm=0.0000 "
                               f"action={action} logp={float(chosen_logp.detach().cpu()):.4f}")
                         debug_lines_printed += 1
 
-                # Feasible count stats (includes states with K<=1)
                 per_level_feasible_sum[lvl] += feasible_count
                 per_level_feasible_count[lvl] += 1
 
-                # Advance environment clone
                 clone.take_action(action)
                 cursors[local_idx] += 1
                 if clone.synthesis_done or cursors[local_idx] >= len(rec.history):
                     finished[local_idx] = True
 
-            # Backward micro-step
             if scaler is not None:
                 scaler.scale(loss_batch).backward()
             else:
                 loss_batch.backward()
 
-    # Optimizer step
     clip_val = getattr(config, "optimizer", {}).get("gradient_clipping", 0) \
         if hasattr(config, "optimizer") else 0
     if scaler is not None:
@@ -338,9 +331,9 @@ def _streaming_update_normalized(
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         optimizer.step()
 
-    policy_loss_value = -(sum_adv_logp / denom_policy)
+    # CHANGED: sum_adv_logp is a tensor on device
+    policy_loss_value = - (sum_adv_logp.item() / denom_policy)
 
-    # Metrics
     mean_entropy_raw = (sum_entropy_raw / S_total) if S_total > 0 else 0.0
     mean_entropy_norm = (sum_entropy_norm / S_total) if S_total > 0 else 0.0
 
@@ -356,7 +349,6 @@ def _streaming_update_normalized(
         else:
             per_level_feasible_avg[lvl] = 0.0
 
-    # Store for external use
     config._last_entropy_norm_mean = mean_entropy_norm
     config._last_entropy_raw_mean = mean_entropy_raw
     for lvl in (0, 1, 2):
