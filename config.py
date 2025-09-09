@@ -107,22 +107,28 @@ class MoleculeConfig:
             "devices_for_workers": ["cuda:0"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
+            # "destination_path": None,
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
-            "search_type": "tasar",
-            "beam_width": 128,
-            # "beam_width": 512,
+
+            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            # "search_type": "tasar",
+            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "sampling_temperature": 1.2,  # For 'iid_mc': temperature for sampling. >1 is more random.
+
+            "beam_width": 256,
             "replan_steps": 12,
-            "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
+            "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
+            # "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
             "nucleus_top_p": 1.,
-            "max_leaves_per_root": 250,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
             "pin_workers_to_core": False,
 
-            "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
-            "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
-            "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
-            "stratified_allow_shortfall_fill": True
+            # "max_leaves_per_root": 250,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
+            # "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
+            # "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
+            # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
+            # "stratified_allow_shortfall_fill": True
         }
 
         # Results and logging
@@ -131,20 +137,24 @@ class MoleculeConfig:
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
 
+        # --- WandB Logging ---
+        self.use_wandb = True  # Master switch for WandB logging
+        self.wandb_project = "graphxform-rl"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"{self.objective_type}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
         # Core RL control
-        self.rl_entropy_coef = 0.05  # Fixed entropy coefficient (tune: 0.04–0.06 typical after normalization)
-        self.rl_entropy_length_normalize = True  # Normalize policy & entropy losses by total decision states S_total
-        self.rl_entropy_use_feasible_log_scaling = True  # Divide per-state entropy by log(feasible_count); disables with False
         self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
+        self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
+        self.rl_batched_replay = False  # Use batched replay (vs streaming)
+
         # Advantage / baseline
-        self.rl_use_ema_baseline = True
-        self.rl_baseline_ema_alpha = 0.9
-        self.rl_advantage_normalize = False  # (Optional) Normalize trajectory advantages; leave False unless reward scale drifts
+        self.rl_advantage_normalize = False  # (Optional) Normalize trajectory advantages; leave False for Dr. GRPO
 
         # Trajectory / logging options
         self.rl_store_trajectories_path = None  # Optional: path to pickle recent trajectories
@@ -154,20 +164,9 @@ class MoleculeConfig:
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
-        self.rl_soft_replay_failure = False  # Keep False unless you want soft handling of rare failures
-        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
-
-        # Debug / diagnostics
-        self.rl_debug_verify_replay = False  # Re-generate design pre/post replay to verify determinism (costly)
-        self.rl_debug_entropy = False  # Print per-state entropy debug lines
-        self.rl_debug_entropy_print_first = 500  # Max number of entropy debug lines
+        self.freeze_all_except_final_layer = True  # If True, only final layer is trainable
 
         # Mixed precision
         self.use_amp = True
         self.amp_dtype = "bf16"  # "bf16" preferred on modern NVIDIA GPUs; "fp16" if needed
         self.use_amp_inference = True  # Also use autocast during rollout generation
-
-        # (Removed legacy fields):
-        #   rl_batched_replay, rl_streaming_backward,
-        #   rl_entropy_improvement_delta, rl_entropy_decay_factor, rl_entropy_min_coef,
-        #   rl_recompute_log_probs (not needed for the streaming baseline; add back only if you implement post-hoc replay)

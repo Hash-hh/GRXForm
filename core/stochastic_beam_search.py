@@ -30,9 +30,6 @@ def sample_gumbels_with_maximum(log_probabilities: np.array, target_max: float):
     Returns:
         [np.array] The sampled Gumbels as np.array of same length as `log_probabilities`
     """
-    if log_probabilities.size == 0:
-        return np.empty((0,), dtype=float)
-
     gumbels = np.random.gumbel(loc=log_probabilities)
     max_gumbel = np.max(gumbels)
 
@@ -179,11 +176,6 @@ def stochastic_beam_search(
                 # Get only feasible actions
                 good_indices = np.where(log_probabilities != -np.inf)[0]
                 log_probabilities = log_probabilities[good_indices]
-
-                # guard: skip if no feasible children (avoids zero-size gumbel sampling)
-                if log_probabilities.size == 0:
-                    continue
-
                 if deterministic:
                     gumbels = log_probabilities
                 else:

@@ -17,6 +17,7 @@ os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 import ray
 import torch
 import numpy as np
+import wandb
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
@@ -157,8 +158,7 @@ def train_for_one_epoch_rl(epoch: int,
     trajectories = gumbeldore_dataset.generate_dataset(
         network_weights=network_weights,
         best_objective=None,
-        memory_aggressive=False,
-        return_raw=True
+        memory_aggressive=False
     )
 
     if len(trajectories) == 0:
@@ -217,7 +217,7 @@ def train_for_one_epoch_rl(epoch: int,
 
     top_20_text_lines = []
     for i, entry in enumerate(top20):
-        top_20_text_lines.append(f"{i+1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
+        top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
     if not top20:
         top_20_text_lines.append("No terminated molecules")
 
@@ -225,7 +225,8 @@ def train_for_one_epoch_rl(epoch: int,
 
 
 # ---------------- Evaluation ---------------- #
-def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer, objective_evaluator: MoleculeObjectiveEvaluator):
+def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
+             objective_evaluator: MoleculeObjectiveEvaluator):
     """
     Uses generation (supervised-style metrics) for evaluation irrespective of RL training.
     """
@@ -261,6 +262,27 @@ if __name__ == '__main__':
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
     config = MoleculeConfig()
 
+    # --- WANDB INITIALIZATION ---
+    if hasattr(config, 'use_wandb') and config.use_wandb:
+        # Convert the config object to a dictionary for wandb
+        config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith('__')}
+        # For nested dictionaries like 'optimizer', wandb prefers a flat structure
+        flat_config = {}
+        for k, v in config_dict.items():
+            if isinstance(v, dict):
+                for sub_k, sub_v in v.items():
+                    flat_config[f"{k}.{sub_k}"] = sub_v
+            else:
+                flat_config[k] = v
+
+        wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=config.wandb_run_name,
+            config=flat_config
+        )
+        wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
+
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
     ray.init(num_gpus=num_gpus, logging_level="info")
     print(ray.available_resources())
@@ -278,6 +300,7 @@ if __name__ == '__main__':
     TOP_K_OBS = 10
     topk_archive_path = os.path.join(config.results_path, "top10_all_time_smiles.txt")
     topk_smiles_scores = {}  # {smiles: best_objective}
+
 
     def update_topk_archive_from_epoch(epoch_top20, rl_mode: bool):
         """
@@ -331,6 +354,7 @@ if __name__ == '__main__':
         with open(topk_archive_path, "w") as f:
             for smiles, score in sorted(topk_smiles_scores.items(), key=lambda x: x[1], reverse=True):
                 f.write(f"{score:.6f}\t{smiles}\n")
+
 
     # Policy network
     network = MoleculeTransformer(config, config.training_device)
@@ -418,6 +442,31 @@ if __name__ == '__main__':
                   f"Best (gen/rl) objective: {val_metric:.4f}")
             logger.log_metrics(generated_loggable_dict, step=epoch)
 
+            # --- METRIC & CHECKPOINT LOGIC ---
+            # First, update the overall best metric
+            if val_metric > best_validation_metric:
+                print(">> Got new best model.")
+                best_validation_metric = val_metric
+                checkpoint["best_model_weights"] = copy.deepcopy(network.get_weights())
+                checkpoint["best_validation_metric"] = best_validation_metric
+                save_checkpoint(checkpoint, "best_model.pt", config)
+
+            # --- WANDB LOGGING (NOW USES UPDATED METRIC) ---
+            if hasattr(config, 'use_wandb') and config.use_wandb:
+                wandb_log = {
+                    "epoch": checkpoint["epochs_trained"],
+                    "best_epoch_objective": val_metric,
+                    "best_overall_objective": best_validation_metric
+                }
+                # Add specific RL metrics if in RL mode
+                if rl_mode_active:
+                    wandb_log["mean_reward"] = generated_loggable_dict.get('mean_reward', float('nan'))
+                    wandb_log["policy_loss"] = generated_loggable_dict.get('policy_loss', float('nan'))
+                    wandb_log["num_trajectories"] = generated_loggable_dict.get('num_trajectories', 0)
+                    wandb_log["mean_trajectory_length"] = generated_loggable_dict.get('mean_traj_length', 0)
+
+                wandb.log(wandb_log)
+
             if rl_mode_active:
                 logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"),
                                      "\n".join(top20_text))
@@ -425,19 +474,11 @@ if __name__ == '__main__':
                 logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"),
                                      top20_text)
 
+            # Update and save the 'last' model checkpoint
             checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
             checkpoint["optimizer_state"] = copy.deepcopy(dict_to_cpu(optimizer.state_dict()))
             checkpoint["validation_metric"] = val_metric
-
             save_checkpoint(checkpoint, "last_model.pt", config)
-
-            if val_metric > best_validation_metric:
-                print(">> Got new best model.")
-                checkpoint["best_model_weights"] = copy.deepcopy(checkpoint["model_weights"])
-                checkpoint["best_validation_metric"] = val_metric
-                best_model_weights = checkpoint["best_model_weights"]
-                best_validation_metric = val_metric
-                save_checkpoint(checkpoint, "best_model.pt", config)
 
             if start_time_counter is not None and time.perf_counter() - start_time_counter > config.wall_clock_limit:
                 print("Time exceeded. Stopping training.")
@@ -466,6 +507,10 @@ if __name__ == '__main__':
     print(test_text_to_save)
     logger.text_artifact(os.path.join(config.results_path, "test_top_20_molecules.txt"),
                          test_text_to_save)
+
+    # --- WANDB FINISH ---
+    if hasattr(config, 'use_wandb') and config.use_wandb:
+        wandb.finish()
 
     print("Finished. Shutting down ray.")
     ray.shutdown()
