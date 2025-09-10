@@ -79,7 +79,7 @@ class MoleculeConfig:
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 3  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 6  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
@@ -98,12 +98,21 @@ class MoleculeConfig:
                 "decay_factor": 1
             }
         }
+        # self.optimizer = {
+        #     "lr": 1e-4,  # learning rate
+        #     "weight_decay": 0,
+        #     "gradient_clipping": 1.,  # Clip gradient to given L2-norm. Set to 0 if no clipping should be performed.
+        #     "schedule": {
+        #         "decay_lr_every_epochs": 1,
+        #         "decay_factor": 1
+        #     }
+        # }
 
         # Self-improvement sequence decoding
         self.gumbeldore_config = {
-            # Number of trajectories with the the highest objective function evaluation to keep for training
-            "num_trajectories_to_keep": 100,
-            "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
+            # Number of trajectories with the highest objective function evaluation to keep for training
+            "num_trajectories_to_keep": 248,
+            "keep_intermediate_trajectories": True,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cuda:0"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
@@ -116,9 +125,9 @@ class MoleculeConfig:
             "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1.2,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 256,
+            "beam_width": 128,
             "replan_steps": 12,
-            "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
+            "num_rounds": 8,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             # "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
             "nucleus_top_p": 1.,
@@ -149,6 +158,7 @@ class MoleculeConfig:
 
         # Core RL control
         self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
+        # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
         self.rl_batched_replay = False  # Use batched replay (vs streaming)
@@ -164,7 +174,7 @@ class MoleculeConfig:
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
-        self.freeze_all_except_final_layer = True  # If True, only final layer is trainable
+        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
 
         # Mixed precision
         self.use_amp = True

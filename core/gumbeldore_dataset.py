@@ -22,6 +22,7 @@ from typing import List, Callable, Tuple, Any, Type, Optional
 
 from core.incremental_sbs import IncrementalSBS
 
+import random
 from config import MoleculeConfig
 from molecule_evaluator import MoleculeObjectiveEvaluator
 
@@ -294,6 +295,72 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     def child_transition_fn(trajectory_action_pairs: List[Tuple[MoleculeDesign, int]]):
         return [traj.transition_fn(action) for traj, action in trajectory_action_pairs]
 
+    def _sample_diverse_from_sorted(
+            beam_leaves: List[MoleculeDesign], num_keep: int
+    ) -> List[MoleculeDesign]:
+        """
+        Picks items from a list sorted in descending order based on a stratified strategy.
+
+        The strategy is:
+        - 25% from the top (highest objective).
+        - 25% from the bottom (lowest objective within the leaves).
+        - 50% sampled randomly from the middle portion.
+
+        This ensures diversity in the training batch by including top performers,
+        marginal performers, and a random sample of the rest.
+
+        Args:
+            beam_leaves: A list of objects, pre-sorted in descending order by their
+                         objective value.
+            num_keep: The total number of items to select and return.
+
+        Returns:
+            A new list containing the selected items, totaling num_keep.
+        """
+        total_leaves = len(beam_leaves)
+
+        # --- Edge Case Handling ---
+        # If we don't have enough leaves to sample from, just return them all.
+        if total_leaves <= num_keep:
+            return beam_leaves
+
+        # --- 1. Calculate the counts for each stratum ---
+        num_top = int(0.25 * num_keep)
+        num_bottom = int(0.25 * num_keep)
+        # The remainder will be sampled from the middle to ensure we get exactly num_keep
+        num_middle = num_keep - num_top - num_bottom
+
+        # --- 2. Select the top samples ---
+        # These are the first `num_top` elements because the list is sorted descendingly.
+        top_samples = beam_leaves[:num_top]
+
+        # --- 3. Select the bottom samples ---
+        # These are the last `num_bottom` elements.
+        # Handle the case where num_bottom might be 0.
+        bottom_samples = beam_leaves[-num_bottom:] if num_bottom > 0 else []
+
+        # --- 4. Define the middle pool and sample from it ---
+        # The middle pool consists of elements not in the top or bottom sections.
+        middle_pool = beam_leaves[num_top:-num_bottom] if num_bottom > 0 else beam_leaves[num_top:]
+
+        # Ensure we don't try to sample more than available in the pool.
+        # This shouldn't happen with the initial `total_leaves <= num_keep` check,
+        # but it's good practice for robustness.
+        actual_middle_sample_size = min(num_middle, len(middle_pool))
+
+        # Sample randomly without replacement from the middle pool.
+        middle_samples = random.sample(middle_pool, k=actual_middle_sample_size)
+
+        # --- 5. Combine and return the results ---
+        # The final list will have top, a random assortment from the middle, and bottom.
+        final_selection = top_samples + middle_samples + bottom_samples
+
+        # As a final guardrail, shuffle the result so the training process doesn't see
+        # samples in a biased (top-middle-bottom) order.
+        random.shuffle(final_selection)
+
+        return final_selection
+
     # Silence RDKit warnings
     RDLogger.DisableLog('rdApp.*')
 
@@ -350,9 +417,9 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                 )
                 results_to_push = []
                 for j, result_idx in enumerate(idx_list):
-                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
-                    #     :config.gumbeldore_config["num_trajectories_to_keep"]]]
-                    result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                    result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
+                        :config.gumbeldore_config["num_trajectories_to_keep"]]]
+                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
                     if result and result[0].objective is None:
                         batch_leaf_evaluation_fn(result)
                     results_to_push.append((result_idx, result))
@@ -387,6 +454,10 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                     # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
                     #     :config.gumbeldore_config["num_trajectories_to_keep"]]]
                     result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                    # we need to sample a diverse set from the leaves beam_leaves_batch[j] which is already sorted in
+                    # descending order based on objective as expected by _sample_diverse_from_sorted
+                    result: List[MoleculeDesign] = _sample_diverse_from_sorted(result,
+                        config.gumbeldore_config["num_trajectories_to_keep"])
                     # Check if they need objective evaluation (this will only be true for deterministic beam search
                     if result and result[0].objective is None:
                         batch_leaf_evaluation_fn(result)
