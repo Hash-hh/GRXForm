@@ -296,7 +296,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         return [traj.transition_fn(action) for traj, action in trajectory_action_pairs]
 
     def _sample_diverse_from_sorted(
-            beam_leaves: List[MoleculeDesign], num_keep: int
+            beam_leaves: List[MoleculeDesign], num_keep: int, randomly=False
     ) -> List[MoleculeDesign]:
         """
         Picks items from a list sorted in descending order based on a stratified strategy.
@@ -317,6 +317,18 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         Returns:
             A new list containing the selected items, totaling num_keep.
         """
+        if randomly:
+            # just keep the top N molecules and randomly sample the rest
+            N = 10
+            if len(beam_leaves) <= num_keep:
+                return beam_leaves
+            top_samples = beam_leaves[:N]
+            remaining_pool = beam_leaves[N:]
+            remaining_samples = random.sample(remaining_pool, k=num_keep - N)
+            final_selection = top_samples + remaining_samples
+            random.shuffle(final_selection)
+            return final_selection
+
         total_leaves = len(beam_leaves)
 
         # --- Edge Case Handling ---
@@ -456,8 +468,8 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                     result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
                     # we need to sample a diverse set from the leaves beam_leaves_batch[j] which is already sorted in
                     # descending order based on objective as expected by _sample_diverse_from_sorted
-                    result: List[MoleculeDesign] = _sample_diverse_from_sorted(result,
-                        config.gumbeldore_config["num_trajectories_to_keep"])
+                    # result: List[MoleculeDesign] = _sample_diverse_from_sorted(result,
+                    #     config.gumbeldore_config["num_trajectories_to_keep"], randomly=True)
                     # Check if they need objective evaluation (this will only be true for deterministic beam search
                     if result and result[0].objective is None:
                         batch_leaf_evaluation_fn(result)

@@ -442,4 +442,4 @@ def dr_grpo_update(model: MoleculeTransformer,
     }
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
-    return metrics
+    return metrics, records
