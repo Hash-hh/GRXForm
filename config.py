@@ -75,7 +75,7 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        self.load_checkpoint_from_path = "model/last_model.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
@@ -127,7 +127,7 @@ class MoleculeConfig:
 
             "beam_width": 32,
             "replan_steps": 12,
-            "num_rounds": 5,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
+            "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             # "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
             "nucleus_top_p": 1.,
@@ -147,7 +147,7 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # --- WandB Logging ---
-        self.use_wandb = False  # Master switch for WandB logging
+        self.use_wandb = True  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
         self.wandb_run_name = f"{self.objective_type}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -156,7 +156,7 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.rl_use_il_distillation = True
+        self.rl_use_il_distillation = False
         # Core RL control
         self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)

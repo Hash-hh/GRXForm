@@ -615,7 +615,7 @@ if __name__ == '__main__':
 
             if rl_mode_active:
                 # The hybrid logic is now encapsulated within this single function
-                generated_loggable_dict, top20_text, _ = train_for_one_epoch_hybrid(
+                generated_loggable_dict, top20_text = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, objective_evaluator
                 )
                 # The last return value (the buffer data) is not needed in the main loop, so we use _
@@ -641,6 +641,11 @@ if __name__ == '__main__':
 
             print(f">> Epoch {checkpoint['epochs_trained']}. "
                   f"Best (gen/rl) objective: {val_metric:.4f}")
+            if rl_mode_active:
+                mean_r = generated_loggable_dict.get('mean_reward', float('nan'))
+                policy_l = generated_loggable_dict.get('policy_loss', float('nan'))
+                print(f"   RL Stats: Mean Reward={mean_r:.4f}, Policy Loss={policy_l:.6f}")
+
             logger.log_metrics(generated_loggable_dict, step=epoch)
 
             # --- METRIC & CHECKPOINT LOGIC ---
