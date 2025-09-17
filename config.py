@@ -125,7 +125,7 @@ class MoleculeConfig:
             "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1.2,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 32,
+            "beam_width": 128,
             "replan_steps": 12,
             "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             # "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
