@@ -61,19 +61,20 @@ class MoleculeConfig:
         # Objective molecule predictor
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
         self.GHGNN_hidden_dim = 113
-        self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
+        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 3  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 6  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
-        self.training_device = "cpu"  # Device on which to perform the supervised training
+        self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
@@ -96,12 +97,12 @@ class MoleculeConfig:
             # Number of trajectories with the the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": True,  # if True, we consider all intermediate, terminable trajectories
-            "devices_for_workers": ["cpu"] * 1,
+            "devices_for_workers": ["cuda:0", "cuda:1"] * 1,
             "destination_path": "./data/generated_molecules.pickle",
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
             "search_type": "tasar",
-            "beam_width": 32,
+            "beam_width": 512,
             "replan_steps": 12,
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
