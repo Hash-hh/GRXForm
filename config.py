@@ -97,6 +97,7 @@ class MoleculeConfig:
             # Number of trajectories with the the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": True,  # if True, we consider all intermediate, terminable trajectories
+            # "devices_for_workers": ["cuda:0"] * 1,
             "devices_for_workers": ["cuda:0", "cuda:1"] * 1,
             "destination_path": "./data/generated_molecules.pickle",
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
@@ -116,3 +117,8 @@ class MoleculeConfig:
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
 
+        # WandB Logging
+        self.use_wandb = True  # Master switch for WandB logging
+        self.wandb_project = "graphxform-rl"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"{self.objective_type}_vanilla_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"

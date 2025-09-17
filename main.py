@@ -16,6 +16,7 @@ os.environ["RAY_DEDUP_LOGS"] = "0"
 os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 import ray
 import torch
+import wandb
 import numpy as np
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
@@ -156,6 +157,26 @@ if __name__ == '__main__':
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
     config = MoleculeConfig()
 
+    if hasattr(config, 'use_wandb') and config.use_wandb:
+        # Convert the config object to a dictionary for wandb
+        config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith('__')}
+        # For nested dictionaries like 'optimizer', wandb prefers a flat structure
+        flat_config = {}
+        for k, v in config_dict.items():
+            if isinstance(v, dict):
+                for sub_k, sub_v in v.items():
+                    flat_config[f"{k}.{sub_k}"] = sub_v
+            else:
+                flat_config[k] = v
+
+        wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=config.wandb_run_name,
+            config=flat_config
+        )
+        wandb.config.update({"task": config.objective_type})
+
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
     ray.init(num_gpus=num_gpus, logging_level="info")
     print(ray.available_resources())
@@ -234,26 +255,57 @@ if __name__ == '__main__':
             print(f">> Epoch {checkpoint['epochs_trained']}. Avg loss level 0: {generated_loggable_dict['loss_level_zero']},"
                   f" Avg loss level 1: {generated_loggable_dict['loss_level_one']},"
                   f" Avg loss level 2: {generated_loggable_dict['loss_level_two']}")
+            val_metric = generated_loggable_dict["best_gen_obj"]  # measure by best objective found during sampling
             logger.log_metrics(generated_loggable_dict, step=epoch)
             # Save the top 20 molecules
             logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"), generated_text_to_save)
 
-            # Save model
-            checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
-            checkpoint["optimizer_state"] = copy.deepcopy(
-                dict_to_cpu(optimizer.state_dict())
-            )
-            val_metric = generated_loggable_dict["best_gen_obj"]   # measure by best objective found during sampling
-            checkpoint["validation_metric"] = val_metric
-            save_checkpoint(checkpoint, "last_model.pt", config)
+            # # Save model
+            # checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
+            # checkpoint["optimizer_state"] = copy.deepcopy(
+            #     dict_to_cpu(optimizer.state_dict())
+            # )
+            # val_metric = generated_loggable_dict["best_gen_obj"]   # measure by best objective found during sampling
+            # checkpoint["validation_metric"] = val_metric
+            # save_checkpoint(checkpoint, "last_model.pt", config)
+            #
+            # if val_metric > best_validation_metric:
+            #     print(">> Got new best model.")
+            #     checkpoint["best_model_weights"] = copy.deepcopy(checkpoint["model_weights"])
+            #     checkpoint["best_validation_metric"] = val_metric
+            #     best_model_weights = checkpoint["best_model_weights"]
+            #     best_validation_metric = val_metric
+            #     save_checkpoint(checkpoint, "best_model.pt", config)
 
+            # Update best metric
             if val_metric > best_validation_metric:
                 print(">> Got new best model.")
-                checkpoint["best_model_weights"] = copy.deepcopy(checkpoint["model_weights"])
-                checkpoint["best_validation_metric"] = val_metric
-                best_model_weights = checkpoint["best_model_weights"]
                 best_validation_metric = val_metric
+
+            # --- 3. WANDB LOGGING ---
+            if hasattr(config, 'use_wandb') and config.use_wandb:
+                wandb_log = {
+                    "epoch": checkpoint["epochs_trained"],
+                    "best_epoch_objective": val_metric,
+                    "best_overall_objective": best_validation_metric,
+                    "loss_level_zero": generated_loggable_dict.get('loss_level_zero', float('nan')),
+                    "loss_level_one": generated_loggable_dict.get('loss_level_one', float('nan')),
+                    "loss_level_two": generated_loggable_dict.get('loss_level_two', float('nan')),
+                    "mean_gen_obj": generated_loggable_dict.get('mean_best_gen_obj', float('nan')),
+                    "mean_top_20_obj": generated_loggable_dict.get('mean_top_20_obj', float('nan'))
+                }
+                wandb.log(wandb_log)
+
+            # Save model checkpoints
+            checkpoint["validation_metric"] = val_metric
+            if val_metric >= best_validation_metric:  # Use >= to save the latest best model
+                checkpoint["best_model_weights"] = copy.deepcopy(network.get_weights())
+                checkpoint["best_validation_metric"] = best_validation_metric
                 save_checkpoint(checkpoint, "best_model.pt", config)
+
+            checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
+            checkpoint["optimizer_state"] = copy.deepcopy(dict_to_cpu(optimizer.state_dict()))
+            save_checkpoint(checkpoint, "last_model.pt", config)
 
             if start_time_counter is not None and time.perf_counter() - start_time_counter > config.wall_clock_limit:
                 print("Time exceeded. Stopping training.")
@@ -279,6 +331,9 @@ if __name__ == '__main__':
     print(test_text_to_save)
     logger.text_artifact(os.path.join(config.results_path, "test_top_20_molecules.txt"),
                          test_text_to_save)
+
+    if hasattr(config, 'use_wandb') and config.use_wandb:
+        wandb.finish()
 
     print("Finished. Shutting down ray.")
     ray.shutdown()
