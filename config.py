@@ -122,8 +122,8 @@ class MoleculeConfig:
 
             "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
-            "sampling_temperature": 2,  # For 'iid_mc': temperature for sampling. >1 is more random.
+            "num_samples_per_instance": 1024,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 128,
             "replan_steps": 12,

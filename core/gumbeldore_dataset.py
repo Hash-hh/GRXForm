@@ -429,9 +429,9 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                 )
                 results_to_push = []
                 for j, result_idx in enumerate(idx_list):
-                    result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
-                        :config.gumbeldore_config["num_trajectories_to_keep"]]]
-                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
+                    #     :config.gumbeldore_config["num_trajectories_to_keep"]]]
+                    result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
                     if result and result[0].objective is None:
                         batch_leaf_evaluation_fn(result)
                     results_to_push.append((result_idx, result))
