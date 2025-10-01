@@ -228,6 +228,9 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
     # For logging: accumulate Σ_i A_i Σ_t logp
     sum_adv_logp = 0.0
 
+    total_entropy = 0.0
+    step_count = 0
+
     # Slice into microbatches of trajectories
     for start in range(0, N, micro):
         batch_records = records[start:start + micro]
@@ -276,14 +279,42 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
 
                 chosen_logp = log_probs[action]
+
+                # Calculate the entropy of the action distribution
+                # H(p) = -sum(p * log(p)). Here, p = exp(log_probs).
+                finite_mask = torch.isfinite(log_probs)
+                finite_log_probs = log_probs[finite_mask]
+
+                # We only need to compute exp for the finite values.
+                finite_probs = torch.exp(finite_log_probs)
+
+                entropy = -torch.sum(finite_probs * finite_log_probs)
+
+                total_entropy += entropy.detach().cpu().item()
+                step_count += 1
+
+                # Get the entropy coefficient from the config
+                entropy_beta = getattr(config, "rl_entropy_beta", 0.0)  # Default to 0.0 if not set
+
                 # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
                 rec.length += 1
                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
 
                 # Form loss contribution (tensor)
-                # Loss overall: -(1/N) * Σ_i A_i Σ_t logp
-                contrib = -(rec.advantage / N) * chosen_logp
+                traj_len = len(rec.history)
+                # Add a safeguard against division by zero for empty or single-step histories
+                if traj_len == 0:
+                    traj_len = 1
+
+                # advantage term: -(1/N) * Σ_i A_i Σ_t logp
+                # normalized by trajectory length
+                advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
+                # advantage_term = -(rec.advantage / N) * chosen_logp
+                entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
+                contrib = advantage_term - entropy_term
+                # contrib = advantage_term
+
                 if scaler is not None:
                     # Accumulate as Python float; we will wrap in a tensor at backward time
                     loss_batch += float(contrib.detach().cpu())
@@ -316,9 +347,10 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         optimizer.step()
 
+    mean_entropy = total_entropy / step_count if step_count > 0 else 0.0
     # Compute logged policy loss
     policy_loss_value = -(1.0 / N) * sum_adv_logp
-    return policy_loss_value
+    return policy_loss_value, mean_entropy
 
 
 def compute_policy_loss_for_logging(records: List[TrajectoryRecord]) -> float:
@@ -358,7 +390,7 @@ def dr_grpo_update(model: MoleculeTransformer,
 
     if use_streaming:
         autocast_ctx, scaler = _make_autocast_ctx(config)
-        policy_loss_val = streaming_replay_and_backward(
+        policy_loss_val, mean_entropy = streaming_replay_and_backward(
             model, optimizer, records, config, device, autocast_ctx, scaler
         )
         replay_mode = "streaming"
@@ -438,6 +470,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         "none_dropped": none_dropped,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
         "amp_dtype": getattr(config, "amp_dtype", "none"),
+        "mean_entropy": float(mean_entropy),
         "adv_norm": bool(normalize_adv)
     }
     if logger:

@@ -80,7 +80,7 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 6  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
@@ -94,8 +94,8 @@ class MoleculeConfig:
             "weight_decay": 0,
             "gradient_clipping": 1.,  # Clip gradient to given L2-norm. Set to 0 if no clipping should be performed.
             "schedule": {
-                "decay_lr_every_epochs": 1,
-                "decay_factor": 1
+                "decay_lr_every_epochs": 2,
+                "decay_factor": 0.99
             }
         }
         # self.optimizer = {
@@ -113,8 +113,8 @@ class MoleculeConfig:
             # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
-            "devices_for_workers": ["cuda:0"] * 1,
-            # "devices_for_workers": ["cuda:0", "cuda:1"],
+            # "devices_for_workers": ["cuda:0"] * 1,
+            "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
             # "destination_path": None,
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
@@ -122,10 +122,10 @@ class MoleculeConfig:
 
             "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 256,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 1024,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 128,
+            "beam_width": 2048,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -156,6 +156,7 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
+        self.rl_entropy_beta = 0.00
         self.rl_use_il_distillation = False
         # Core RL control
         self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)

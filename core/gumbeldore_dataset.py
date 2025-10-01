@@ -59,6 +59,7 @@ def batched_iid_monte_carlo_sampling(
 
                 # Handle cases where all actions are infeasible, leading to sum(probs)=0
                 if np.sum(probs) <= 0 or not np.isfinite(probs).all():
+                    print("Warning: All actions infeasible or non-finite probabilities encountered. Marking trajectory as infeasible.")
                     trajectory.infeasibility_flag = True
                     trajectory.finalize()
                     finished_trajectories.append(trajectory)

@@ -614,7 +614,6 @@ if __name__ == '__main__':
             rl_mode_active = getattr(config, "use_dr_grpo", False)
 
             if rl_mode_active:
-                # The hybrid logic is now encapsulated within this single function
                 generated_loggable_dict, top20_text = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, objective_evaluator
                 )
@@ -662,14 +661,25 @@ if __name__ == '__main__':
                 wandb_log = {
                     "epoch": checkpoint["epochs_trained"],
                     "best_epoch_objective": val_metric,
-                    "best_overall_objective": best_validation_metric
+                    "best_overall_objective": best_validation_metric,
+                    "learning_rate": scheduler.get_last_lr()[0]
                 }
                 # Add specific RL metrics if in RL mode
                 if rl_mode_active:
-                    wandb_log["mean_reward"] = generated_loggable_dict.get('mean_reward', float('nan'))
-                    wandb_log["policy_loss"] = generated_loggable_dict.get('policy_loss', float('nan'))
-                    wandb_log["num_trajectories"] = generated_loggable_dict.get('num_trajectories', 0)
-                    wandb_log["mean_trajectory_length"] = generated_loggable_dict.get('mean_traj_length', 0)
+                    # Define the specific list of metrics you want to log from the RL update
+                    keys_to_log = [
+                        'mean_reward',
+                        'best_reward',
+                        'mean_advantage',
+                        'std_advantage',
+                        'policy_loss',
+                        'mean_entropy',
+                        'mean_trajectory_length'
+                    ]
+                    # Add only the specified metrics to the log
+                    for key in keys_to_log:
+                        if key in generated_loggable_dict:
+                            wandb_log[key] = generated_loggable_dict[key]
 
                 wandb.log(wandb_log)
 
