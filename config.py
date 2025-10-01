@@ -156,7 +156,7 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.rl_entropy_beta = 0.00
+        self.rl_entropy_beta = 0.01
         self.rl_use_il_distillation = False
         # Core RL control
         self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
