@@ -18,6 +18,43 @@ class TrajectoryRecord:
     advantage: Optional[float] = None
     replay_failed: bool = False  # (not used in streaming path unless you extend soft-fail)
 
+def apply_novelty_bonus(records: List[TrajectoryRecord],
+                        memory: dict,
+                        beta: float) -> float:
+    """Applies novelty bonus to records' rewards in-place and updates the memory."""
+    if not beta > 0:
+        return 0.0
+
+    total_bonus_added = 0.0
+    new_smiles_in_batch = {}
+
+    for r in records:
+        smiles = r.design.smiles_string
+        if not smiles:
+            print("[DR-GRPO] Warning: empty SMILES string; skipping novelty bonus.")
+            continue
+
+        # Get count from global memory + count from molecules seen so far in this batch
+        global_count = memory.get(smiles, 0)
+        batch_count = new_smiles_in_batch.get(smiles, 0)
+        total_count = global_count + batch_count
+        # if total_count != 0:
+        #     print(f"[DR-GRPO] Novelty bonus: SMILES {smiles} seen {total_count} times before.")
+
+        # Calculate bonus and add it to the record's reward
+        novelty_bonus = 1.0 / math.sqrt(total_count + 1)
+        bonus_to_add = beta * novelty_bonus
+        r.reward += bonus_to_add
+        total_bonus_added += bonus_to_add
+
+        # Update the batch count
+        new_smiles_in_batch[smiles] = batch_count + 1
+
+    # After processing the whole batch, update the global memory
+    for smiles, count in new_smiles_in_batch.items():
+        memory[smiles] = memory.get(smiles, 0) + count
+
+    return total_bonus_added / len(records) if records else 0.0
 
 def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryRecord], int, int):
     records: List[TrajectoryRecord] = []
@@ -261,6 +298,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 rec = batch_records[local_idx]
                 clone = clones[local_idx]
                 cursor = cursors[local_idx]
+                # print(rec)
 
                 lvl = clone.current_action_level
                 if lvl == 0:
@@ -302,17 +340,21 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
 
                 # Form loss contribution (tensor)
-                traj_len = len(rec.history)
-                # Add a safeguard against division by zero for empty or single-step histories
-                if traj_len == 0:
-                    traj_len = 1
+                # print(rec.history)
+                # print("OOGA BOOGA")
+                # traj_len = len(rec.history)
+                # # Add a safeguard against division by zero for empty or single-step histories
+                # if traj_len == 0:
+                #     traj_len = 1
 
                 # advantage term: -(1/N) * Σ_i A_i Σ_t logp
                 # normalized by trajectory length
-                advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
-                # advantage_term = -(rec.advantage / N) * chosen_logp
+                # advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
+                advantage_term = -(rec.advantage / N) * chosen_logp
                 entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
                 contrib = advantage_term - entropy_term
+                # print("advantage: ", advantage_term.item())
+                # print("entropy: ", entropy_term.item())
                 # contrib = advantage_term
 
                 if scaler is not None:
@@ -367,7 +409,8 @@ def dr_grpo_update(model: MoleculeTransformer,
                    designs: List[MoleculeDesign],
                    config,
                    device: torch.device,
-                   logger=None):
+                   logger=None,
+                   novelty_memory: Optional[dict] = None):
     records, none_dropped, nonfinite_dropped = filter_and_build_records(designs)
     if not records:
         metrics = {
@@ -382,6 +425,15 @@ def dr_grpo_update(model: MoleculeTransformer,
         if logger:
             logger.info(f"[DR-GRPO] {metrics}")
         return metrics
+
+    best_objective_score = float(max(r.reward for r in records)) if records else float("-inf")
+
+    avg_novelty_bonus = 0.0
+    if novelty_memory is not None and getattr(config, "rl_use_novelty_bonus"):
+        novelty_beta = getattr(config, "rl_novelty_beta")
+        if novelty_beta > 0:
+            print(f"[RL] Applying novelty bonus with beta={novelty_beta:.4f}")
+            avg_novelty_bonus = apply_novelty_bonus(records, novelty_memory, novelty_beta)
 
     normalize_adv = getattr(config, "rl_advantage_normalize", False)
     baseline = compute_baseline_and_advantages(records, normalize=normalize_adv)
@@ -459,6 +511,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         "baseline": baseline,
         "mean_reward": float(mean_reward),
         "best_reward": float(max(rewards)),
+        "best_objective": best_objective_score,  # This is max(Objective)
         "mean_advantage": float(mean_adv),
         "std_advantage": float(std_adv),
         "fraction_pos_adv": float(sum(a > 0 for a in advantages) / len(advantages)),
@@ -470,6 +523,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         "none_dropped": none_dropped,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
         "amp_dtype": getattr(config, "amp_dtype", "none"),
+        "mean_novelty_bonus": float(avg_novelty_bonus),
         "mean_entropy": float(mean_entropy),
         "adv_norm": bool(normalize_adv)
     }

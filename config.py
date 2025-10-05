@@ -79,7 +79,7 @@ class MoleculeConfig:
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 6  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
@@ -94,8 +94,8 @@ class MoleculeConfig:
             "weight_decay": 0,
             "gradient_clipping": 1.,  # Clip gradient to given L2-norm. Set to 0 if no clipping should be performed.
             "schedule": {
-                "decay_lr_every_epochs": 2,
-                "decay_factor": 0.99
+                "decay_lr_every_epochs": 1,
+                "decay_factor": 1
             }
         }
         # self.optimizer = {
@@ -125,7 +125,7 @@ class MoleculeConfig:
             "num_samples_per_instance": 1024,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 2048,
+            "beam_width": 1024,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -156,7 +156,11 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.rl_entropy_beta = 0.01
+        self.rl_entropy_beta = 0.005
+
+        self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
+        self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
+
         self.rl_use_il_distillation = False
         # Core RL control
         self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)

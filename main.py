@@ -3,7 +3,7 @@ import copy
 import importlib
 import os
 import time
-from typing import List
+from typing import List, Optional
 
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LambdaLR
@@ -194,7 +194,7 @@ def train_for_one_epoch_hybrid(epoch: int,
 
     # ====== 4. COMBINE METRICS AND RETURN ======
     combined_metrics = {**rl_metrics, **il_metrics}
-    combined_metrics["best_gen_obj"] = combined_metrics.get("best_reward", float("-inf"))
+    combined_metrics["best_gen_obj"] = combined_metrics.get("best_objective", float("-inf"))
 
     print(f"[Hybrid] RL_reward_mean={rl_metrics.get('mean_reward', float('nan')):.4f}  "
           f"RL_policy_loss={rl_metrics.get('policy_loss', float('nan')):.6f}  "
@@ -215,7 +215,8 @@ def train_for_one_epoch_rl(epoch: int,
                            network: MoleculeTransformer,
                            network_weights: dict,
                            optimizer: torch.optim.Optimizer,
-                           objective_evaluator: MoleculeObjectiveEvaluator):
+                           objective_evaluator: MoleculeObjectiveEvaluator,
+                           novelty_memory: Optional[dict] = None):
     """
     RL fine-tuning epoch:
       1. Generate trajectories (terminated molecules) with current policy.
@@ -263,10 +264,11 @@ def train_for_one_epoch_rl(epoch: int,
         designs=trajectories,
         config=config,
         device=torch.device(config.training_device),
-        logger=None
+        logger=None,
+        novelty_memory=novelty_memory
     )
     print("dr GRPO update done.")
-    metrics["best_gen_obj"] = metrics.get("best_reward", float("-inf"))
+    metrics["best_gen_obj"] = metrics.get("best_objective", float("-inf"))
     metrics["mean_best_gen_obj"] = metrics.get("mean_reward", float("-inf"))
     metrics.setdefault("loss_level_zero", 0.0)
     metrics.setdefault("loss_level_one", 0.0)
@@ -607,15 +609,25 @@ if __name__ == '__main__':
             print(f"Wall clock limit of training set to {config.wall_clock_limit / 3600} hours")
             start_time_counter = time.perf_counter()
 
+        rl_mode_active = getattr(config, "use_dr_grpo", False)
+
+        if getattr(config, "rl_use_novelty_bonus") and rl_mode_active:
+            print("Novelty bonus enabled.")
+            novelty_memory = {}
+        else:
+            novelty_memory = None
+
         for epoch in range(config.num_epochs):
             print("------")
             network_weights = copy.deepcopy(network.get_weights())
 
-            rl_mode_active = getattr(config, "use_dr_grpo", False)
+            if novelty_memory is not None:
+                print(f"Start of Epoch {epoch + 1}: Novelty memory contains {len(novelty_memory)} unique SMILES.")
 
             if rl_mode_active:
                 generated_loggable_dict, top20_text = train_for_one_epoch_rl(
-                    epoch, config, network, network_weights, optimizer, objective_evaluator
+                    epoch, config, network, network_weights, optimizer, objective_evaluator,
+                    novelty_memory=novelty_memory
                 )
                 # The last return value (the buffer data) is not needed in the main loop, so we use _
                 val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
@@ -670,11 +682,13 @@ if __name__ == '__main__':
                     keys_to_log = [
                         'mean_reward',
                         'best_reward',
+                        'best_objective'
                         'mean_advantage',
                         'std_advantage',
                         'policy_loss',
                         'mean_entropy',
-                        'mean_trajectory_length'
+                        'mean_traj_length',
+                        # 'mean_novelty_bonus'
                     ]
                     # Add only the specified metrics to the log
                     for key in keys_to_log:
