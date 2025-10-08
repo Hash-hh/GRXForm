@@ -688,6 +688,7 @@ if __name__ == '__main__':
                         'policy_loss',
                         'mean_entropy',
                         'mean_traj_length',
+                        'num_trajectories'
                         # 'mean_novelty_bonus'
                     ]
                     # Add only the specified metrics to the log

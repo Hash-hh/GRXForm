@@ -320,19 +320,21 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 # Calculate the entropy of the action distribution
                 # H(p) = -sum(p * log(p)). Here, p = exp(log_probs).
-                finite_mask = torch.isfinite(log_probs)
-                finite_log_probs = log_probs[finite_mask]
+                # finite_mask = torch.isfinite(log_probs)
+                # finite_log_probs = log_probs[finite_mask]
 
-                # We only need to compute exp for the finite values.
-                finite_probs = torch.exp(finite_log_probs)
+                # # We only need to compute exp for the finite values.
+                # finite_probs = torch.exp(finite_log_probs)
 
-                entropy = -torch.sum(finite_probs * finite_log_probs)
+                # entropy = -torch.sum(finite_probs * finite_log_probs)
+                entropy = 0
 
-                total_entropy += entropy.detach().cpu().item()
+                # total_entropy += entropy.detach().cpu().item()
+                total_entropy += entropy
                 step_count += 1
 
                 # Get the entropy coefficient from the config
-                entropy_beta = getattr(config, "rl_entropy_beta", 0.0)  # Default to 0.0 if not set
+                # entropy_beta = getattr(config, "rl_entropy_beta", 0.0)  # Default to 0.0 if not set
 
                 # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
@@ -351,11 +353,11 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 # normalized by trajectory length
                 # advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
                 advantage_term = -(rec.advantage / N) * chosen_logp
-                entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
-                contrib = advantage_term - entropy_term
+                # entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
+                # contrib = advantage_term - entropy_term
                 # print("advantage: ", advantage_term.item())
                 # print("entropy: ", entropy_term.item())
-                # contrib = advantage_term
+                contrib = advantage_term
 
                 if scaler is not None:
                     # Accumulate as Python float; we will wrap in a tensor at backward time
