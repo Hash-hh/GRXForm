@@ -10,7 +10,8 @@ class MoleculeConfig:
         self.latent_dimension = 512
         self.num_transformer_blocks = 10
         self.num_heads = 16
-        self.dropout = 0.
+        self.dropout = 0.2
+        # self.dropout = 0.
         self.use_rezero_transformer = True
 
         # Environment options
@@ -90,7 +91,7 @@ class MoleculeConfig:
 
         # Optimizer
         self.optimizer = {
-            "lr": 1e-4,  # learning rate
+            "lr": 5e-5,  # learning rate
             "weight_decay": 0,
             "gradient_clipping": 1.,  # Clip gradient to given L2-norm. Set to 0 if no clipping should be performed.
             "schedule": {
@@ -120,12 +121,12 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "tasar",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "beam_search",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
             "num_samples_per_instance": 1024,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 128,
+            "beam_width": 1024,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -180,7 +181,7 @@ class MoleculeConfig:
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
-        self.freeze_all_except_final_layer = True  # If True, only final layer is trainable
+        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
 
         # Mixed precision
         self.use_amp = True
