@@ -13,6 +13,7 @@ class TrajectoryRecord:
     design: MoleculeDesign
     history: List[int]
     reward: float
+    log_probs_history: Optional[List[float]] = None
     log_prob_sum: Optional[torch.Tensor] = None
     length: Optional[int] = None
     advantage: Optional[float] = None
@@ -72,7 +73,9 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
         if not math.isfinite(obj):
             nonfinite_dropped += 1
             continue
-        records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj)))
+        # records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj)))
+        records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj),
+                                        log_probs_history=list(d.log_probs_history)))
     if none_dropped or nonfinite_dropped:
         print(f"[DR-GRPO] filter: dropped none={none_dropped} nonfinite={nonfinite_dropped} kept={len(records)}")
     return records, none_dropped, nonfinite_dropped
@@ -264,6 +267,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
     # For logging: accumulate Σ_i A_i Σ_t logp
     sum_adv_logp = 0.0
+    total_ppo_loss = 0.0
 
     total_entropy = 0.0
     step_count = 0
@@ -318,6 +322,30 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 chosen_logp = log_probs[action]
 
+                # DR. GRPO CLIPPED OBJECTIVE
+                # Retrieve the old log probability from when the action was originally sampled
+                old_logp_float = rec.log_probs_history[cursor]
+                old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
+
+                # Calculate the probability ratio
+                ratio = torch.exp(chosen_logp - old_logp)
+
+                # Get advantage and clipping epsilon
+                advantage = rec.advantage
+                epsilon = config.rl_ppo_clip_epsilon
+
+                # Calculate the surrogate objectives
+                surr1 = ratio * advantage
+                surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
+
+                # The PPO loss is the negative of the minimum of the two surrogate objectives.
+                # We normalize by the total number of trajectories (N) as in the original implementation.
+                ppo_loss_step = -torch.min(surr1, surr2) / N
+                contrib = ppo_loss_step
+
+                total_ppo_loss += contrib.detach().cpu().item()
+
+
                 # Calculate the entropy of the action distribution
                 # H(p) = -sum(p * log(p)). Here, p = exp(log_probs).
                 # finite_mask = torch.isfinite(log_probs)
@@ -352,12 +380,15 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 # advantage term: -(1/N) * Σ_i A_i Σ_t logp
                 # normalized by trajectory length
                 # advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
-                advantage_term = -(rec.advantage / N) * chosen_logp
+
+                # advantage_term = -(rec.advantage / N) * chosen_logp
+
                 # entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
                 # contrib = advantage_term - entropy_term
                 # print("advantage: ", advantage_term.item())
                 # print("entropy: ", entropy_term.item())
-                contrib = advantage_term
+
+                # contrib = advantage_term
 
                 if scaler is not None:
                     # Accumulate as Python float; we will wrap in a tensor at backward time
@@ -393,8 +424,8 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
     mean_entropy = total_entropy / step_count if step_count > 0 else 0.0
     # Compute logged policy loss
-    policy_loss_value = -(1.0 / N) * sum_adv_logp
-    return policy_loss_value, mean_entropy
+    # policy_loss_value = -(1.0 / N) * sum_adv_logp
+    return total_ppo_loss, mean_entropy
 
 
 def compute_policy_loss_for_logging(records: List[TrajectoryRecord]) -> float:

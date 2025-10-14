@@ -68,8 +68,11 @@ def batched_iid_monte_carlo_sampling(
                 probs /= np.sum(probs)
                 action = np.random.choice(len(probs), p=probs)
 
-                # The transition_fn performs a shallow copy and applies the action
-                new_trajectory, is_done = trajectory.transition_fn(action)
+                # # The transition_fn performs a shallow copy and applies the action
+                # new_trajectory, is_done = trajectory.transition_fn(action)
+
+                chosen_log_prob = log_probs_list[i][action]
+                new_trajectory, is_done = trajectory.transition_fn(action, chosen_log_prob)
 
                 if is_done:
                     finished_trajectories.append(new_trajectory)

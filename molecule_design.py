@@ -99,6 +99,8 @@ class MoleculeDesign(BaseTrajectory):
         # molecule. See class docstring for an example.
         self.history: List[int] = []
 
+        self.log_probs_history: List[float] = []
+
         self.objective: Optional[float] = None
         # Synthetic accessibility score, obtained from RDKit, ranging from 1 [easiest] to 10 [hardest]
         self.sa_score: float = 0.
@@ -215,7 +217,7 @@ class MoleculeDesign(BaseTrajectory):
             log_probs = np.log(softmax(logits))
         return log_probs
 
-    def take_action(self, action: int):
+    def take_action(self, action: int, log_prob: Optional[float] = None):
         """
         Takes an action on the current action level and updates everything accordingly (see inline comments).
         Note that the updates are performed in-place!
@@ -261,6 +263,10 @@ class MoleculeDesign(BaseTrajectory):
             self.update_topological_distance_matrix(new_atom_created=False)
 
         self.history.append(int(action))
+
+        if log_prob is not None:
+            self.log_probs_history.append(log_prob)
+
         self.current_action_level = next_level
         self.update_action_mask()
 
@@ -429,6 +435,7 @@ class MoleculeDesign(BaseTrajectory):
         new.current_action_level = self.current_action_level
         new.current_action_mask = None if self.current_action_mask is None else self.current_action_mask.copy()
         new.history = self.history.copy()
+        new.log_probs_history = self.log_probs_history.copy()
         new.objective = self.objective
         new.sa_score = self.sa_score
         new.infeasibility_flag = self.infeasibility_flag
@@ -439,14 +446,14 @@ class MoleculeDesign(BaseTrajectory):
 
         return new
 
-    def transition_fn(self, action: int) -> Tuple['BaseTrajectory', bool]:
+    def transition_fn(self, action: int, log_prob: Optional[float] = None) -> Tuple['BaseTrajectory', bool]:
         """
         Performs a shallow clone (faster than deepcopy) and applies the action.
         Returns:
             (new_trajectory, is_terminated)
         """
         copied_molecule = self._shallow_clone()
-        copied_molecule.take_action(action)
+        copied_molecule.take_action(action, log_prob)
         return copied_molecule, copied_molecule.synthesis_done
 
     def to_max_evaluation_fn(self) -> float:

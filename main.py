@@ -682,7 +682,7 @@ if __name__ == '__main__':
                     keys_to_log = [
                         'mean_reward',
                         'best_reward',
-                        'best_objective'
+                        'best_objective',
                         'mean_advantage',
                         'std_advantage',
                         'policy_loss',
