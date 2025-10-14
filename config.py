@@ -10,8 +10,7 @@ class MoleculeConfig:
         self.latent_dimension = 512
         self.num_transformer_blocks = 10
         self.num_heads = 16
-        self.dropout = 0.2
-        # self.dropout = 0.
+        self.dropout = 0.
         self.use_rezero_transformer = True
 
         # Environment options
@@ -81,9 +80,9 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 10  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 3000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -114,8 +113,8 @@ class MoleculeConfig:
             # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
-            "devices_for_workers": ["cuda:0"] * 1,
-            # "devices_for_workers": ["cuda:0", "cuda:1"],
+            # "devices_for_workers": ["cuda:0"] * 1,
+            "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
             # "destination_path": None,
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
@@ -159,7 +158,7 @@ class MoleculeConfig:
 
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
 
-        self.rl_entropy_beta = 0.00
+        self.rl_entropy_beta = 0.005
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
