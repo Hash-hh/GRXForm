@@ -80,7 +80,7 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 10  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 3000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
@@ -113,8 +113,8 @@ class MoleculeConfig:
             # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
-            # "devices_for_workers": ["cuda:0"] * 1,
-            "devices_for_workers": ["cuda:0", "cuda:1"],
+            "devices_for_workers": ["cuda:0"] * 1,
+            #"devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
             # "destination_path": None,
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
@@ -165,7 +165,7 @@ class MoleculeConfig:
 
         self.rl_use_il_distillation = False
         # Core RL control
-        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
