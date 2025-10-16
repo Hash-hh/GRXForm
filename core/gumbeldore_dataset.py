@@ -287,6 +287,11 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                      best_objective: Optional[float] = None,
                      memory_aggressive: bool = False,
                      ):
+    network = MoleculeTransformer(config, device)
+    network.load_state_dict(network_weights)
+    network.to(network.device)
+    network.eval()
+
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
         return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
 
@@ -297,7 +302,25 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         return objs
 
     def child_transition_fn(trajectory_action_pairs: List[Tuple[MoleculeDesign, int]]):
-        return [traj.transition_fn(action) for traj, action in trajectory_action_pairs]
+        # Collect all trajectories that need a forward pass into a single list.
+        trajectories = [traj for traj, _ in trajectory_action_pairs]
+
+        # Perform a SINGLE batched forward pass to get all log probabilities at once.
+        log_probs_list = MoleculeDesign.log_probability_fn(trajectories, network)
+
+        # Now, iterate through the original pairs and apply the actions using the pre-computed log probs.
+        results = []
+        for i, (traj, action) in enumerate(trajectory_action_pairs):
+            # Get the log probability for the chosen action from the batched result.
+            chosen_log_prob = log_probs_list[i][action]
+
+            # Call the transition function with the correct log probability.
+            new_trajectory, is_done = traj.transition_fn(action, chosen_log_prob)
+            results.append((new_trajectory, is_done))
+
+        return results
+
+        # return [traj.transition_fn(action) for traj, action in trajectory_action_pairs]
 
     def _sample_diverse_from_sorted(
             beam_leaves: List[MoleculeDesign], num_keep: int, randomly=False

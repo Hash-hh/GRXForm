@@ -120,12 +120,12 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 256,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 1024,
+            "beam_width": 128,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -147,7 +147,7 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
         self.wandb_run_name = f"{self.objective_type}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -156,14 +156,17 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
+        self.ppo_epochs = 4  # Number of PPO epochs per RL update
+
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
 
-        self.rl_entropy_beta = 0.005
+        self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
 
         self.rl_use_il_distillation = False
+
         # Core RL control
         self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)

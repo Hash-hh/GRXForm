@@ -234,14 +234,14 @@ def batched_replay_and_compute_log_probs(
         rec.length = lengths[i]
 
 
-# --------- STREAMING BACKWARD (FIXED) ---------
 def streaming_replay_and_backward(model: MoleculeTransformer,
                                   optimizer: torch.optim.Optimizer,
                                   records: List[TrajectoryRecord],
                                   config,
                                   device: torch.device,
                                   autocast_ctx,
-                                  scaler):
+                                  scaler,
+                                  current_epoch: int):
     """
     Streaming (per-step) backward with microbatching.
     For each replay step (single forward over current active subset) we:
@@ -328,7 +328,12 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
 
                 # Calculate the probability ratio
+                # print(chosen_logp)
+                # print(old_logp)
                 ratio = torch.exp(chosen_logp - old_logp)
+
+                # if current_epoch != 0:
+                #     print("ratio:", ratio)
 
                 # Get advantage and clipping epsilon
                 advantage = rec.advantage
@@ -477,10 +482,27 @@ def dr_grpo_update(model: MoleculeTransformer,
     use_streaming = getattr(config, "rl_streaming_backward", False)
 
     if use_streaming:
-        autocast_ctx, scaler = _make_autocast_ctx(config)
-        policy_loss_val, mean_entropy = streaming_replay_and_backward(
-            model, optimizer, records, config, device, autocast_ctx, scaler
-        )
+        ppo_epochs = getattr(config, "rl_ppo_epochs", 4)  # Default to 4 if not in config
+        # autocast_ctx, scaler = _make_autocast_ctx(config)
+        # policy_loss_val, mean_entropy = streaming_replay_and_backward(
+        #     model, optimizer, records, config, device, autocast_ctx, scaler
+        # )
+        # replay_mode = "streaming"
+        total_policy_loss = 0
+        total_mean_entropy = 0
+        for i in range(ppo_epochs):
+            autocast_ctx, scaler = _make_autocast_ctx(config)
+
+            # The model weights are updated in-place on each iteration of this loop
+            policy_loss_val, mean_entropy = streaming_replay_and_backward(
+                model, optimizer, records, config, device, autocast_ctx, scaler, i
+            )
+
+            # For logging, we can average the loss and entropy over the update epochs
+            total_policy_loss += policy_loss_val
+            total_mean_entropy += mean_entropy
+        total_policy_loss = total_policy_loss / ppo_epochs
+        total_mean_entropy = total_mean_entropy / ppo_epochs
         replay_mode = "streaming"
     else:
         # Fallback: old accumulate-then-backward path
@@ -551,7 +573,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         "mean_advantage": float(mean_adv),
         "std_advantage": float(std_adv),
         "fraction_pos_adv": float(sum(a > 0 for a in advantages) / len(advantages)),
-        "policy_loss": float(policy_loss_val),
+        "policy_loss": float(total_policy_loss),
         "num_trajectories": len(records),
         "mean_traj_length": float(sum(r.length for r in records) / len(records)) if records else 0.0,
         "replay_mode": replay_mode,
@@ -560,7 +582,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
         "amp_dtype": getattr(config, "amp_dtype", "none"),
         "mean_novelty_bonus": float(avg_novelty_bonus),
-        "mean_entropy": float(mean_entropy),
+        "mean_entropy": float(total_mean_entropy),
         "adv_norm": bool(normalize_adv)
     }
     if logger:
