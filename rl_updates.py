@@ -249,6 +249,8 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
       - call backward exactly once on that scalar
     This avoids reusing a freed graph while keeping activation memory low.
     """
+    num_ppo_epochs = config.ppo_epochs
+
     model.eval()  # deterministic
     assert all(r.advantage is not None for r in records), "Compute advantages first."
     N = len(records)
@@ -320,36 +322,33 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 if action >= log_probs.shape[0]:
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
 
-                chosen_logp = log_probs[action]
-
                 # DR. GRPO CLIPPED OBJECTIVE
-                # Retrieve the old log probability from when the action was originally sampled
-                old_logp_float = rec.log_probs_history[cursor]
-                old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
-
+                chosen_logp = log_probs[action]
                 # Calculate the probability ratio
                 # print(chosen_logp)
                 # print(old_logp)
-                ratio = torch.exp(chosen_logp - old_logp)
-
-                # if current_epoch != 0:
-                #     print("ratio:", ratio)
 
                 # Get advantage and clipping epsilon
                 advantage = rec.advantage
                 epsilon = config.rl_ppo_clip_epsilon
 
-                # Calculate the surrogate objectives
-                surr1 = ratio * advantage
-                surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
+                if current_epoch == 0 and num_ppo_epochs == 1:
+                    # simple REINFORCE update: loss = -advantage * log_prob
+                    ppo_loss_step = -(advantage / N) * chosen_logp
+                else:
+                    # Retrieve the old log probability from when the action was originally sampled
+                    old_logp_float = rec.log_probs_history[cursor]
+                    old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
+                    ratio = torch.exp(chosen_logp - old_logp)
+                    surr1 = ratio * advantage
+                    surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
+                    ppo_loss_step = -torch.min(surr1, surr2) / N
 
                 # The PPO loss is the negative of the minimum of the two surrogate objectives.
                 # We normalize by the total number of trajectories (N) as in the original implementation.
-                ppo_loss_step = -torch.min(surr1, surr2) / N
                 contrib = ppo_loss_step
 
                 total_ppo_loss += contrib.detach().cpu().item()
-
 
                 # Calculate the entropy of the action distribution
                 # H(p) = -sum(p * log(p)). Here, p = exp(log_probs).
@@ -362,11 +361,10 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 entropy = -torch.sum(finite_probs * finite_log_probs)
                 # entropy = 0
 
-
                 step_count += 1
 
                 # Get the entropy coefficient from the config
-                entropy_beta = getattr(config, "rl_entropy_beta", 0.0)  # Default to 0.0 if not set
+                entropy_beta = config.rl_entropy_beta  # Default to 0.0 if not set
 
                 # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
