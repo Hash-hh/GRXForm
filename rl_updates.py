@@ -477,10 +477,10 @@ def dr_grpo_update(model: MoleculeTransformer,
     normalize_adv = getattr(config, "rl_advantage_normalize", False)
     baseline = compute_baseline_and_advantages(records, normalize=normalize_adv)
 
-    use_streaming = getattr(config, "rl_streaming_backward", False)
+    use_streaming = getattr(config, "rl_streaming_backward", True)
 
     if use_streaming:
-        ppo_epochs = getattr(config, "rl_ppo_epochs", 4)  # Default to 4 if not in config
+        ppo_epochs = config.ppo_epochs  # Default to 4 if not in config
         # autocast_ctx, scaler = _make_autocast_ctx(config)
         # policy_loss_val, mean_entropy = streaming_replay_and_backward(
         #     model, optimizer, records, config, device, autocast_ctx, scaler

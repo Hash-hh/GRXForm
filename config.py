@@ -156,7 +156,7 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.ppo_epochs = 1  # Number of GRPO iterations per RL update, for now keep 1 for simplicity (simple REINFORCE with baseline)
+        self.ppo_epochs = 1  # Number of GRPO iterations per RL update, for now keep 1 for simplicity (REINFORCE with baseline)
 
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
 
