@@ -98,9 +98,17 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
 
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
-    first_atom_token = final_design.atoms[1]
-    if hasattr(first_atom_token, "item"):
-        first_atom_token = int(first_atom_token.item())
+    first_atom_token = int(final_design.atoms[1])
+
+    # print(f"[DR-GRPO] Fresh initial clone: {first_atom_token}")
+    # # print type of first_atom_token
+    # print(f"[DR-GRPO] first_atom_token type: {type(first_atom_token)}")
+    # print(final_design.atoms)
+    # if hasattr(first_atom_token, "item"):
+    #     print("first_atom_token is a tensor, converting to int")
+    #     first_atom_token = int(first_atom_token.item())
+    #     print(first_atom_token)
+
     return MoleculeDesign(config=final_design.config, initial_atom=first_atom_token)
 
 
@@ -137,103 +145,6 @@ def _make_autocast_ctx(config):
         ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return ctx, scaler
 
-
-# --------- (OLD non-streaming replay functions retained for fallback) ---------
-def sequential_replay_and_compute_log_probs(
-        model: MoleculeTransformer,
-        records: List[TrajectoryRecord],
-        device: torch.device,
-        autocast_ctx,
-        assert_masks: bool,
-        debug_verify: bool = False
-):
-    model.eval()
-    for rec in records:
-        design_clone = _fresh_initial_clone(rec.design)
-        rec.log_prob_sum = torch.tensor(0.0, device=device)
-        steps = 0
-        for action in rec.history:
-            if design_clone.synthesis_done:
-                break
-            with autocast_ctx:
-                batch = MoleculeDesign.list_to_batch([design_clone], device=device)
-                head0, head1, head2 = model(batch)
-                current_level = design_clone.current_action_level
-                if current_level == 0:
-                    level_logits = head0[0]
-                elif current_level == 1:
-                    level_logits = head1[0]
-                else:
-                    level_logits = head2[0]
-                log_probs = _prepare_masked_log_probs(level_logits, design_clone.current_action_mask, device,
-                                                      assert_masks=assert_masks)
-            if action >= log_probs.shape[0]:
-                raise RuntimeError(f"[Replay] Action {action} out of bounds {log_probs.shape[0]}")
-            rec.log_prob_sum = rec.log_prob_sum + log_probs[action].detach().float()
-            steps += 1
-            design_clone.take_action(action)
-            if design_clone.synthesis_done:
-                break
-        rec.length = steps
-
-
-def batched_replay_and_compute_log_probs(
-        model: MoleculeTransformer,
-        records: List[TrajectoryRecord],
-        device: torch.device,
-        autocast_ctx,
-        assert_masks: bool,
-        debug_verify: bool = False
-):
-    model.eval()
-    n = len(records)
-    if n == 0:
-        return
-    clones = [_fresh_initial_clone(r.design) for r in records]
-    cursors = [0] * n
-    lengths = [0] * n
-    log_sums = [torch.tensor(0.0, device=device) for _ in records]
-
-    active = [i for i in range(n)]
-    while active:
-        batch_clones = [clones[i] for i in active]
-        with autocast_ctx:
-            head0, head1, head2 = model(MoleculeDesign.list_to_batch(batch_clones, device=device))
-        remove = []
-        for local_pos, rec_idx in enumerate(active):
-            rec = records[rec_idx]
-            clone = clones[rec_idx]
-            cursor = cursors[rec_idx]
-            if cursor >= len(rec.history) or clone.synthesis_done:
-                remove.append(rec_idx)
-                continue
-            lvl = clone.current_action_level
-            if lvl == 0:
-                level_logits = head0[local_pos]
-            elif lvl == 1:
-                level_logits = head1[local_pos]
-            else:
-                level_logits = head2[local_pos]
-            log_probs = _prepare_masked_log_probs(level_logits, clone.current_action_mask, device,
-                                                  assert_masks=assert_masks)
-            action = rec.history[cursor]
-            if action >= log_probs.shape[0]:
-                raise RuntimeError(f"[Replay] Action {action} out of bounds {log_probs.shape[0]}")
-            log_sums[rec_idx] = log_sums[rec_idx] + log_probs[action].detach().float()
-            lengths[rec_idx] += 1
-            cursors[rec_idx] += 1
-            clone.take_action(action)
-            if clone.synthesis_done or cursors[rec_idx] >= len(rec.history):
-                remove.append(rec_idx)
-        if remove:
-            done = set(remove)
-            active = [i for i in active if i not in done]
-
-    for i, rec in enumerate(records):
-        rec.log_prob_sum = log_sums[i]
-        rec.length = lengths[i]
-
-
 def streaming_replay_and_backward(model: MoleculeTransformer,
                                   optimizer: torch.optim.Optimizer,
                                   records: List[TrajectoryRecord],
@@ -249,7 +160,11 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
       - call backward exactly once on that scalar
     This avoids reusing a freed graph while keeping activation memory low.
     """
-    num_ppo_epochs = config.ppo_epochs
+    # num_ppo_epochs = config.ppo_epochs
+    epsilon = config.rl_ppo_clip_epsilon
+    clip_val = config.optimizer.get("gradient_clipping")
+    # Get the entropy coefficient from the config
+    entropy_beta = config.rl_entropy_beta
 
     model.eval()  # deterministic
     assert all(r.advantage is not None for r in records), "Compute advantages first."
@@ -328,21 +243,21 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 # print(chosen_logp)
                 # print(old_logp)
 
-                # Get advantage and clipping epsilon
+                # Get advantage
                 advantage = rec.advantage
-                epsilon = config.rl_ppo_clip_epsilon
 
-                if current_epoch == 0 and num_ppo_epochs == 1:
-                    # simple REINFORCE update: loss = -advantage * log_prob
-                    ppo_loss_step = -(advantage / N) * chosen_logp
-                else:
-                    # Retrieve the old log probability from when the action was originally sampled
-                    old_logp_float = rec.log_probs_history[cursor]
-                    old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
-                    ratio = torch.exp(chosen_logp - old_logp)
-                    surr1 = ratio * advantage
-                    surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
-                    ppo_loss_step = -torch.min(surr1, surr2) / N
+                # if current_epoch == 0 and num_ppo_epochs == 1:
+                #     # simple REINFORCE update: loss = -advantage * log_prob
+                #     ppo_loss_step = -(advantage / N) * chosen_logp
+                # else:
+
+                # Retrieve the old log probability from when the action was originally sampled
+                old_logp_float = rec.log_probs_history[cursor]
+                old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
+                ratio = torch.exp(chosen_logp - old_logp)
+                surr1 = ratio * advantage
+                surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
+                ppo_loss_step = -torch.min(surr1, surr2) / N
 
                 # The PPO loss is the negative of the minimum of the two surrogate objectives.
                 # We normalize by the total number of trajectories (N) as in the original implementation.
@@ -363,8 +278,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 step_count += 1
 
-                # Get the entropy coefficient from the config
-                entropy_beta = config.rl_entropy_beta  # Default to 0.0 if not set
+
 
                 # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
@@ -416,7 +330,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 loss_batch.backward()
 
     # Finish optimizer step
-    clip_val = config.optimizer.get("gradient_clipping", 0)
+
     if scaler is not None:
         if clip_val and clip_val > 0:
             scaler.unscale_(optimizer)
@@ -474,88 +388,31 @@ def dr_grpo_update(model: MoleculeTransformer,
             print(f"[RL] Applying novelty bonus with beta={novelty_beta:.4f}")
             avg_novelty_bonus = apply_novelty_bonus(records, novelty_memory, novelty_beta)
 
-    normalize_adv = getattr(config, "rl_advantage_normalize", False)
+    normalize_adv = config.rl_advantage_normalize
     baseline = compute_baseline_and_advantages(records, normalize=normalize_adv)
 
-    use_streaming = getattr(config, "rl_streaming_backward", True)
+    ppo_epochs = config.ppo_epochs
+    # autocast_ctx, scaler = _make_autocast_ctx(config)
+    # policy_loss_val, mean_entropy = streaming_replay_and_backward(
+    #     model, optimizer, records, config, device, autocast_ctx, scaler
+    # )
+    total_policy_loss = 0
+    total_mean_entropy = 0
 
-    if use_streaming:
-        ppo_epochs = config.ppo_epochs  # Default to 4 if not in config
-        # autocast_ctx, scaler = _make_autocast_ctx(config)
-        # policy_loss_val, mean_entropy = streaming_replay_and_backward(
-        #     model, optimizer, records, config, device, autocast_ctx, scaler
-        # )
-        # replay_mode = "streaming"
-        total_policy_loss = 0
-        total_mean_entropy = 0
-        for i in range(ppo_epochs):
-            autocast_ctx, scaler = _make_autocast_ctx(config)
-
-            # The model weights are updated in-place on each iteration of this loop
-            policy_loss_val, mean_entropy = streaming_replay_and_backward(
-                model, optimizer, records, config, device, autocast_ctx, scaler, i
-            )
-
-            # For logging, we can average the loss and entropy over the update epochs
-            total_policy_loss += policy_loss_val
-            total_mean_entropy += mean_entropy
-        total_policy_loss = total_policy_loss / ppo_epochs
-        total_mean_entropy = total_mean_entropy / ppo_epochs
-        replay_mode = "streaming"
-    else:
-        # Fallback: old accumulate-then-backward path
-        assert_masks = getattr(config, "rl_assert_masks", False)
+    for i in range(ppo_epochs):
         autocast_ctx, scaler = _make_autocast_ctx(config)
-        use_batched = getattr(config, "rl_batched_replay", False) and len(records) > 1
-        if use_batched:
-            batched_replay_and_compute_log_probs(model, records, device, autocast_ctx, assert_masks=assert_masks)
-        else:
-            sequential_replay_and_compute_log_probs(model, records, device, autocast_ctx, assert_masks=assert_masks)
 
-        log_probs = torch.stack([r.log_prob_sum for r in records])
-        advantages = torch.tensor([r.advantage for r in records], dtype=log_probs.dtype, device=log_probs.device)
-        loss = -(advantages * log_probs).mean()
+        # The model weights are updated in-place on each iteration of this loop
+        policy_loss_val, mean_entropy = streaming_replay_and_backward(
+            model, optimizer, records, config, device, autocast_ctx, scaler, i
+        )
 
-        if not torch.isfinite(loss):
-            if logger:
-                logger.warning("[DR-GRPO] Non-finite loss; skipping step.")
-            metrics = {
-                "baseline": baseline,
-                "mean_reward": float(sum(r.reward for r in records) / len(records)),
-                "best_reward": float(max(r.reward for r in records)),
-                "mean_advantage": float(sum(r.advantage for r in records) / len(records)),
-                "std_advantage": 0.0,
-                "fraction_pos_adv": float(sum(r.advantage > 0 for r in records) / len(records)),
-                "policy_loss": float("nan"),
-                "num_trajectories": len(records),
-                "mean_traj_length": float(sum(r.length for r in records) / len(records)),
-                "replay_mode": "batched" if use_batched else "sequential",
-                "invalid_dropped": nonfinite_dropped,
-                "none_dropped": none_dropped,
-                "amp_enabled": bool(getattr(config, "use_amp", False)),
-                "amp_dtype": getattr(config, "amp_dtype", "none"),
-                "adv_norm": bool(normalize_adv)
-            }
-            return metrics
+        # For logging, we can average the loss and entropy over the update epochs
+        total_policy_loss += policy_loss_val
+        total_mean_entropy += mean_entropy
 
-        optimizer.zero_grad()
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            clip_val = config.optimizer.get("gradient_clipping", 0)
-            if clip_val and clip_val > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            clip_val = config.optimizer.get("gradient_clipping", 0)
-            if clip_val and clip_val > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
-            optimizer.step()
-
-        policy_loss_val = float(loss.item())
-        replay_mode = "batched" if use_batched else "sequential"
+    total_policy_loss = total_policy_loss / ppo_epochs
+    total_mean_entropy = total_mean_entropy / ppo_epochs
 
     rewards = [r.reward for r in records]
     advantages = [r.advantage for r in records]
@@ -574,7 +431,6 @@ def dr_grpo_update(model: MoleculeTransformer,
         "policy_loss": float(total_policy_loss),
         "num_trajectories": len(records),
         "mean_traj_length": float(sum(r.length for r in records) / len(records)) if records else 0.0,
-        "replay_mode": replay_mode,
         "invalid_dropped": nonfinite_dropped,
         "none_dropped": none_dropped,
         "amp_enabled": bool(getattr(config, "use_amp", False)),

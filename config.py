@@ -82,7 +82,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 5000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 10000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -122,10 +122,10 @@ class MoleculeConfig:
 
             "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 256,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 64,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 256,
+            "beam_width": 64,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -147,10 +147,10 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_wor"
+        self.wandb_run_name = f"{self.objective_type}_iid_mc_64_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
