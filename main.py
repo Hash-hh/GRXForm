@@ -42,6 +42,7 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
         memory_aggressive=False
     )
     print("Generated molecules")
+    print(f"Total oracle calls this epoch: {metrics.get('total_oracle_calls', 'N/A')}")
     print(f"Mean obj. over fresh best mols: {metrics['mean_best_gen_obj']:.3f}")
     print(f"Best / worst obj. over fresh best mols: {metrics['best_gen_obj']:.3f}, {metrics['worst_gen_obj']:.3f}")
     print(f"Mean obj. over all time top 20 mols: {metrics['mean_top_20_obj']:.3f}")
@@ -133,6 +134,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     metrics = gumbeldore_dataset.generate_dataset(copy.deepcopy(network.get_weights()), memory_aggressive=False)
     top_20_mols = metrics["top_20_molecules"]
     metrics = {
+        f"{eval_type}_total_oracle_calls": metrics.get("total_oracle_calls"),
         f"{eval_type}_mean_top_20_obj": metrics["mean_top_20_obj"],
         f"{eval_type}_mean_top_20_sa_score": metrics["mean_top_20_sa_score"],
         f"{eval_type}_best_obj": metrics['best_gen_obj'],
@@ -292,6 +294,7 @@ if __name__ == '__main__':
                     "loss_level_one": generated_loggable_dict.get('loss_level_one', float('nan')),
                     "loss_level_two": generated_loggable_dict.get('loss_level_two', float('nan')),
                     "mean_gen_obj": generated_loggable_dict.get('mean_best_gen_obj', float('nan')),
+                    "total_oracle_calls": generated_loggable_dict.get('total_oracle_calls', float('nan')),
                     "mean_top_20_obj": generated_loggable_dict.get('mean_top_20_obj', float('nan'))
                 }
                 wandb.log(wandb_log)

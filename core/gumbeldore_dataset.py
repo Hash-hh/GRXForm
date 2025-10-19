@@ -110,14 +110,16 @@ class GumbeldoreDataset:
                 if do_break:
                     break
 
-        ray.get(future_tasks)
+        worker_call_counts = ray.get(future_tasks)
+        total_calls = sum(worker_call_counts)
         del job_pool
         del network_weights
         torch.cuda.empty_cache()
 
-        return self.process_results(problem_instances, results)
+        return self.process_results(problem_instances, results, total_calls)
+        # return self.process_results(problem_instances, results)
 
-    def process_results(self, problem_instances, results):
+    def process_results(self, problem_instances, results, total_calls):
         """
         Processes the results from Gumbeldore search and save it to a pickle. Each trajectory will be represented as a dict with the
         following keys and values
@@ -139,6 +141,7 @@ class GumbeldoreDataset:
         - "top_20_molecules": A list of SMILES strings with obj. of the top 20 obj.
         """
         metrics_return = dict()
+        metrics_return["total_oracle_calls"] = total_calls
         instances_dict = dict()  # Use a dict to directly avoid duplicates
         for i, _ in enumerate(problem_instances):
             for molecule in results[i]:  # type: MoleculeDesign
@@ -193,10 +196,16 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                      best_objective: Optional[float] = None,
                      memory_aggressive: bool = False,
                      ):
+
+    total_oracle_calls = 0
+
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
         return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
 
     def batch_leaf_evaluation_fn(trajectories: List[MoleculeDesign]) -> np.array:
+        nonlocal total_oracle_calls
+        total_oracle_calls += len(trajectories)
+
         objs = objective_evaluator.predict_objective(trajectories)
         for i, obj in enumerate(objs):
             trajectories[i].objective = obj
@@ -277,6 +286,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                 result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][:config.gumbeldore_config["num_trajectories_to_keep"]]]
                 # Check if they need objective evaluation (this will only be true for deterministic beam search
                 if result[0].objective is None:
+                    total_oracle_calls += len(result)
                     batch_leaf_evaluation_fn(result)
                 results_to_push.append((result_idx, result))
 
@@ -288,4 +298,6 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     del network
     del network_weights
     torch.cuda.empty_cache()
+
+    return total_oracle_calls
 
