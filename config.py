@@ -120,12 +120,12 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
             "num_samples_per_instance": 64,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 64,
+            "beam_width": 1024,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -160,6 +160,7 @@ class MoleculeConfig:
 
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
 
+        # self.rl_entropy_beta = 0.0
         self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
@@ -172,7 +173,6 @@ class MoleculeConfig:
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
-        self.rl_batched_replay = False  # Use batched replay (vs streaming)
 
         # Advantage / baseline
         self.rl_advantage_normalize = False  # (Optional) Normalize trajectory advantages; leave False for Dr. GRPO
@@ -181,7 +181,6 @@ class MoleculeConfig:
         self.rl_store_trajectories_path = None  # Optional: path to pickle recent trajectories
         self.rl_max_group_size = None  # Optional cap on trajectories per update
         self.rl_log_advantages = False  # If True, add detailed advantage stats to logs
-        self.rl_checkpoint_every = 1  # Save checkpoint every N RL epochs
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
