@@ -457,11 +457,34 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Experiment')
     parser.add_argument('--config', help="Path to optional config relative to main.py")
+
+    # We add arguments for the parameters defined in sweep.yaml
+    # Use defaults from base config if the script is run without `wandb agent`
+    temp_config_for_defaults = MoleculeConfig()  # Load defaults once
+    parser.add_argument('--learning_rate', type=float,
+                        default=temp_config_for_defaults.optimizer["lr"],
+                        help='Optimizer learning rate')
+    parser.add_argument('--rl_entropy_beta', type=float,
+                        default=temp_config_for_defaults.rl_entropy_beta,
+                        help='Entropy bonus coefficient for RL')
+    parser.add_argument('--ppo_epochs', type=int,
+                        default=temp_config_for_defaults.ppo_epochs,
+                        help='Number of PPO epochs per RL update')
+    parser.add_argument('--rl_ppo_clip_epsilon', type=float,
+                        default=temp_config_for_defaults.rl_ppo_clip_epsilon,
+                        help='GRPO clipping epsilon')
+    del temp_config_for_defaults  # Clean up temporary config
+
     args = parser.parse_args()
 
     if args.config is not None:
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
     config = MoleculeConfig()
+
+    config.optimizer["lr"] = args.learning_rate
+    config.rl_entropy_beta = args.rl_entropy_beta
+    config.ppo_epochs = args.ppo_epochs
+    config.rl_ppo_clip_epsilon = args.rl_ppo_clip_epsilon
 
     # --- WANDB INITIALIZATION ---
     if hasattr(config, 'use_wandb') and config.use_wandb:
@@ -482,7 +505,14 @@ if __name__ == '__main__':
             name=config.wandb_run_name,
             config=flat_config
         )
-        wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
+
+        config.optimizer["lr"] = wandb.config.get('optimizer.lr', config.optimizer["lr"]) # Example
+        config.rl_entropy_beta = wandb.config.get('rl_entropy_beta', config.rl_entropy_beta)
+        config.ppo_epochs = wandb.config.get('ppo_epochs', config.ppo_epochs)
+        config.rl_ppo_clip_epsilon = wandb.config.get('rl_ppo_clip_epsilon', config.rl_ppo_clip_epsilon)
+
+        wandb.config.update({"task": config.objective_type}, allow_val_change=True)
+        # wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
 
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
     ray.init(num_gpus=num_gpus, logging_level="info")

@@ -120,12 +120,12 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "iid_mc",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
             "num_samples_per_instance": 64,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 1024,
+            "beam_width": 64,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -147,7 +147,7 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # --- WandB Logging ---
-        self.use_wandb = False  # Master switch for WandB logging
+        self.use_wandb = True  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
         self.wandb_run_name = f"{self.objective_type}_iid_mc_64_samples"
