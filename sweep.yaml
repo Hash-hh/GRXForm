@@ -11,7 +11,7 @@ parameters:
     values: [5.0e-5, 1.0e-4, 1.0e-3] # Corresponds to config.optimizer["lr"]
 
   rl_entropy_beta:
-    values: [0.0005, 0.001, 0.002]  # Corresponds to config.rl_entropy_beta
+    values: [0.0005, 0.001, 0.003]  # Corresponds to config.rl_entropy_beta
 
   ppo_epochs:
     values: [1, 4, 10]              # Corresponds to config.ppo_epochs
