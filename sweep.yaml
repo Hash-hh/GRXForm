@@ -1,5 +1,5 @@
 program: main.py # main training script
-method: bayes      # Strategy:
+method: grid      # Strategy:
                   # options: random, bayes, grid
 
 metric:
@@ -11,10 +11,10 @@ parameters:
     values: [5.0e-5, 1.0e-4, 1.0e-3] # Corresponds to config.optimizer["lr"]
 
   rl_entropy_beta:
-    values: [0.0005, 0.001, 0.003]  # Corresponds to config.rl_entropy_beta
+    values: [0.001, 0.002, 0.003]  # Corresponds to config.rl_entropy_beta
 
   ppo_epochs:
-    values: [1, 4, 10]              # Corresponds to config.ppo_epochs
+    values: [1]              # Corresponds to config.ppo_epochs
 
   rl_ppo_clip_epsilon:
-    values: [0.1, 0.2, 0.3]         # Corresponds to config.rl_ppo_clip_epsilon
+    values: [0.2]         # Corresponds to config.rl_ppo_clip_epsilon

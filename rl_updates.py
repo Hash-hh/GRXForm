@@ -150,44 +150,44 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                                   records: List[TrajectoryRecord],
                                   config,
                                   device: torch.device,
-                                  autocast_ctx,
-                                  scaler,
-                                  current_epoch: int):
+                                  autocast_ctx, # expects context manager from _make_autocast_ctx
+                                  scaler, # expects GradScaler or None from _make_autocast_ctx
+                                  current_ppo_epoch_idx: int): # Renamed last arg for clarity
     """
-    Streaming (per-step) backward with microbatching.
-    For each replay step (single forward over current active subset) we:
-      - accumulate a scalar loss_batch across active trajectories
-      - call backward exactly once on that scalar
-    This avoids reusing a freed graph while keeping activation memory low.
+    Optimized streaming backward: Accumulates loss per microbatch,
+    performs one backward pass per microbatch. Less error handling.
     """
-    # num_ppo_epochs = config.ppo_epochs
     epsilon = config.rl_ppo_clip_epsilon
     clip_val = config.optimizer.get("gradient_clipping")
-    # Get the entropy coefficient from the config
     entropy_beta = config.rl_entropy_beta
 
-    model.eval()  # deterministic
+    model.eval() # Set to train mode for gradients
+
     assert all(r.advantage is not None for r in records), "Compute advantages first."
     N = len(records)
     if N == 0:
-        return 0.0
+        return 0.0, 0.0 # Return loss and entropy
 
-    # Init metrics fields
-    for rec in records:
-        rec.log_prob_sum = torch.tensor(0.0, device=device)
-        rec.length = 0
-
+    # Call zero_grad once before processing all microbatches
     optimizer.zero_grad(set_to_none=True)
 
     micro = getattr(config, "rl_replay_microbatch_size", 0) or N
     assert micro > 0, "Microbatch size must be > 0"
 
-    # For logging: accumulate Σ_i A_i Σ_t logp
-    sum_adv_logp = 0.0
-    total_ppo_loss = 0.0
+    total_ppo_loss_accum = 0.0 # Accumulator for logging
+    total_entropy_accum = 0.0  # Accumulator for logging
+    total_steps_processed = 0  # Counter for averaging entropy
 
-    total_entropy = 0.0
-    step_count = 0
+    # Pre-convert old log probs to tensors
+    for r in records:
+        # **MODIFIED**: Assume log_probs_history exists and is correct length.
+        # Will raise error later if not.
+        if r.log_probs_history:
+            r.precomputed_old_logps = torch.tensor(r.log_probs_history, device=device, dtype=torch.float32)
+        else:
+            # If history might be missing, raise error explicitly or handle as needed
+            raise ValueError(f"Trajectory record is missing log_probs_history: {r.design.smiles_string if r.design else 'N/A'}")
+
 
     # Slice into microbatches of trajectories
     for start in range(0, N, micro):
@@ -196,6 +196,10 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
         cursors = [0] * len(batch_records)
         finished = [False] * len(batch_records)
 
+        # Accumulator for the entire microbatch loss
+        total_microbatch_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+
+        # Step through time within the microbatch
         while True:
             active_local_indices = [
                 i for i, (r, cur, fin, cl) in enumerate(zip(batch_records, cursors, finished, clones))
@@ -205,116 +209,61 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 break
 
             active_clones = [clones[i] for i in active_local_indices]
+
+            # Single forward pass
             with autocast_ctx:
                 head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
+                output_dtype = head0.dtype
 
-            # Accumulate per-step loss across active trajectories, then backward once.
-            if scaler is not None:
-                # Use FP32 accumulator outside scaled region? Simpler to accumulate inside.
-                loss_batch = 0.0
-            else:
-                loss_batch = torch.tensor(0.0, device=device, dtype=head0.dtype)
-
+            # Accumulate loss in this loop
             for pos_in_active, local_idx in enumerate(active_local_indices):
                 rec = batch_records[local_idx]
                 clone = clones[local_idx]
                 cursor = cursors[local_idx]
-                # print(rec)
 
                 lvl = clone.current_action_level
-                if lvl == 0:
-                    level_logits = head0[pos_in_active]
-                elif lvl == 1:
-                    level_logits = head1[pos_in_active]
-                else:
-                    level_logits = head2[pos_in_active]
+                if lvl == 0: level_logits = head0[pos_in_active]
+                elif lvl == 1: level_logits = head1[pos_in_active]
+                else: level_logits = head2[pos_in_active]
 
                 log_probs = _prepare_masked_log_probs(
                     level_logits, clone.current_action_mask, device,
-                    assert_masks=getattr(config, "rl_assert_masks", False)
+                    assert_masks=getattr(config, "rl_assert_masks", False) # Keep assertion from config
                 )
                 action = rec.history[cursor]
-                if action >= log_probs.shape[0]:
-                    raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
 
-                # DR. GRPO CLIPPED OBJECTIVE
+                # **MODIFIED**: Removed explicit check for action bounds.
+                # Will raise IndexError if action >= log_probs.shape[0].
                 chosen_logp = log_probs[action]
-                # Calculate the probability ratio
-                # print(chosen_logp)
-                # print(old_logp)
 
-                # Get advantage
+                # PPO Objective Calculation
                 advantage = rec.advantage
 
-                # if current_epoch == 0 and num_ppo_epochs == 1:
-                #     # simple REINFORCE update: loss = -advantage * log_prob
-                #     ppo_loss_step = -(advantage / N) * chosen_logp
-                # else:
+                # **MODIFIED**: Removed explicit check for old logp existence/index.
+                # Will raise IndexError if cursor >= len(rec.precomputed_old_logps).
+                old_logp = rec.precomputed_old_logps[cursor].to(dtype=chosen_logp.dtype)
 
-                # Retrieve the old log probability from when the action was originally sampled
-                old_logp_float = rec.log_probs_history[cursor]
-                old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
-                ratio = torch.exp(chosen_logp - old_logp)
+                ratio = torch.exp(chosen_logp - old_logp.detach())
                 surr1 = ratio * advantage
                 surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
                 ppo_loss_step = -torch.min(surr1, surr2) / N
-
-                # The PPO loss is the negative of the minimum of the two surrogate objectives.
-                # We normalize by the total number of trajectories (N) as in the original implementation.
                 contrib = ppo_loss_step
 
-                total_ppo_loss += contrib.detach().cpu().item()
-
-                # Calculate the entropy of the action distribution
-                # H(p) = -sum(p * log(p)). Here, p = exp(log_probs).
+                # Entropy Calculation
                 finite_mask = torch.isfinite(log_probs)
                 finite_log_probs = log_probs[finite_mask]
-
-                # # We only need to compute exp for the finite values.
                 finite_probs = torch.exp(finite_log_probs)
-
                 entropy = -torch.sum(finite_probs * finite_log_probs)
-                # entropy = 0
-
-                step_count += 1
-
-
-
-                # Metrics accumulation
-                rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
-                rec.length += 1
-                sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
-
-                # Form loss contribution (tensor)
-                # print(rec.history)
-                # print("OOGA BOOGA")
-                # traj_len = len(rec.history)
-                # # Add a safeguard against division by zero for empty or single-step histories
-                # if traj_len == 0:
-                #     traj_len = 1
-
-                # advantage term: -(1/N) * Σ_i A_i Σ_t logp
-                # normalized by trajectory length
-                # advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
-
-                # advantage_term = -(rec.advantage / N) * chosen_logp
-
-                entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
+                entropy_term = (entropy_beta / N) * entropy
                 contrib -= entropy_term
 
-                total_entropy += entropy.detach().cpu().item()
-                # total_entropy += entropy
+                # Accumulate loss for the microbatch
+                total_microbatch_loss = total_microbatch_loss + contrib.to(total_microbatch_loss.dtype)
 
-                # print("advantage: ", advantage_term.item())
-                # print("entropy: ", entropy_term.item())
-
-                # contrib = advantage_term
-
-                if scaler is not None:
-                    # Accumulate as Python float; we will wrap in a tensor at backward time
-                    loss_batch += float(contrib.detach().cpu())
-                else:
-                    loss_batch = loss_batch + contrib
+                # Logging Accumulation
+                total_ppo_loss_accum += ppo_loss_step.item()
+                total_entropy_accum += entropy.item()
+                total_steps_processed += 1
 
                 # Advance environment
                 clone.take_action(action)
@@ -322,15 +271,14 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 if clone.synthesis_done or cursors[local_idx] >= len(rec.history):
                     finished[local_idx] = True
 
-            # Single backward for this step
-            if scaler is not None:
-                loss_batch_tensor = torch.tensor(loss_batch, device=device, dtype=head0.dtype, requires_grad=True)
-                scaler.scale(loss_batch_tensor).backward()
-            else:
-                loss_batch.backward()
+        # Single backward pass PER MICROBATCH
+        if total_microbatch_loss.requires_grad:
+             if scaler is not None:
+                 scaler.scale(total_microbatch_loss).backward()
+             else:
+                 total_microbatch_loss.backward()
 
-    # Finish optimizer step
-
+    # Perform optimizer step AFTER processing ALL microbatches
     if scaler is not None:
         if clip_val and clip_val > 0:
             scaler.unscale_(optimizer)
@@ -342,10 +290,212 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
         optimizer.step()
 
-    mean_entropy = total_entropy / step_count if step_count > 0 else 0.0
-    # Compute logged policy loss
-    # policy_loss_value = -(1.0 / N) * sum_adv_logp
-    return total_ppo_loss, mean_entropy
+    # Calculate final metrics for logging
+    mean_entropy = total_entropy_accum / total_steps_processed if total_steps_processed > 0 else 0.0
+
+    return total_ppo_loss_accum, mean_entropy
+
+# def streaming_replay_and_backward(model: MoleculeTransformer,
+#                                   optimizer: torch.optim.Optimizer,
+#                                   records: List[TrajectoryRecord],
+#                                   config,
+#                                   device: torch.device,
+#                                   autocast_ctx,
+#                                   scaler,
+#                                   current_epoch: int):
+#     """
+#     Streaming (per-step) backward with microbatching.
+#     For each replay step (single forward over current active subset) we:
+#       - accumulate a scalar loss_batch across active trajectories
+#       - call backward exactly once on that scalar
+#     This avoids reusing a freed graph while keeping activation memory low.
+#     """
+#     # num_ppo_epochs = config.ppo_epochs
+#     epsilon = config.rl_ppo_clip_epsilon
+#     clip_val = config.optimizer.get("gradient_clipping")
+#     # Get the entropy coefficient from the config
+#     entropy_beta = config.rl_entropy_beta
+#
+#     model.eval()  # deterministic
+#     assert all(r.advantage is not None for r in records), "Compute advantages first."
+#     N = len(records)
+#     if N == 0:
+#         return 0.0
+#
+#     # Init metrics fields
+#     for rec in records:
+#         rec.log_prob_sum = torch.tensor(0.0, device=device)
+#         rec.length = 0
+#
+#     optimizer.zero_grad(set_to_none=True)
+#
+#     micro = getattr(config, "rl_replay_microbatch_size", 0) or N
+#     assert micro > 0, "Microbatch size must be > 0"
+#
+#     # For logging: accumulate Σ_i A_i Σ_t logp
+#     sum_adv_logp = 0.0
+#     total_ppo_loss = 0.0
+#
+#     total_entropy = 0.0
+#     step_count = 0
+#
+#     # Slice into microbatches of trajectories
+#     for start in range(0, N, micro):
+#         batch_records = records[start:start + micro]
+#         clones = [_fresh_initial_clone(r.design) for r in batch_records]
+#         cursors = [0] * len(batch_records)
+#         finished = [False] * len(batch_records)
+#
+#         while True:
+#             active_local_indices = [
+#                 i for i, (r, cur, fin, cl) in enumerate(zip(batch_records, cursors, finished, clones))
+#                 if (not fin) and (cur < len(r.history)) and (not cl.synthesis_done)
+#             ]
+#             if not active_local_indices:
+#                 break
+#
+#             active_clones = [clones[i] for i in active_local_indices]
+#             with autocast_ctx:
+#                 head0, head1, head2 = model(MoleculeDesign.list_to_batch(active_clones, device=device))
+#
+#             # Accumulate per-step loss across active trajectories, then backward once.
+#             if scaler is not None:
+#                 # Use FP32 accumulator outside scaled region? Simpler to accumulate inside.
+#                 loss_batch = 0.0
+#             else:
+#                 loss_batch = torch.tensor(0.0, device=device, dtype=head0.dtype)
+#
+#             for pos_in_active, local_idx in enumerate(active_local_indices):
+#                 rec = batch_records[local_idx]
+#                 clone = clones[local_idx]
+#                 cursor = cursors[local_idx]
+#                 # print(rec)
+#
+#                 lvl = clone.current_action_level
+#                 if lvl == 0:
+#                     level_logits = head0[pos_in_active]
+#                 elif lvl == 1:
+#                     level_logits = head1[pos_in_active]
+#                 else:
+#                     level_logits = head2[pos_in_active]
+#
+#                 log_probs = _prepare_masked_log_probs(
+#                     level_logits, clone.current_action_mask, device,
+#                     assert_masks=getattr(config, "rl_assert_masks", False)
+#                 )
+#                 action = rec.history[cursor]
+#                 if action >= log_probs.shape[0]:
+#                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
+#
+#                 # DR. GRPO CLIPPED OBJECTIVE
+#                 chosen_logp = log_probs[action]
+#                 # Calculate the probability ratio
+#                 # print(chosen_logp)
+#                 # print(old_logp)
+#
+#                 # Get advantage
+#                 advantage = rec.advantage
+#
+#                 # if current_epoch == 0 and num_ppo_epochs == 1:
+#                 #     # simple REINFORCE update: loss = -advantage * log_prob
+#                 #     ppo_loss_step = -(advantage / N) * chosen_logp
+#                 # else:
+#
+#                 # Retrieve the old log probability from when the action was originally sampled
+#                 old_logp_float = rec.log_probs_history[cursor]
+#                 old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
+#                 ratio = torch.exp(chosen_logp - old_logp)
+#                 surr1 = ratio * advantage
+#                 surr2 = torch.clamp(ratio, 1.0 - epsilon, 1.0 + epsilon) * advantage
+#                 ppo_loss_step = -torch.min(surr1, surr2) / N
+#
+#                 # The PPO loss is the negative of the minimum of the two surrogate objectives.
+#                 # We normalize by the total number of trajectories (N) as in the original implementation.
+#                 contrib = ppo_loss_step
+#
+#                 total_ppo_loss += contrib.detach().cpu().item()
+#
+#                 # Calculate the entropy of the action distribution
+#                 # H(p) = -sum(p * log(p)). Here, p = exp(log_probs).
+#                 finite_mask = torch.isfinite(log_probs)
+#                 finite_log_probs = log_probs[finite_mask]
+#
+#                 # # We only need to compute exp for the finite values.
+#                 finite_probs = torch.exp(finite_log_probs)
+#
+#                 entropy = -torch.sum(finite_probs * finite_log_probs)
+#                 # entropy = 0
+#
+#                 step_count += 1
+#
+#
+#
+#                 # Metrics accumulation
+#                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
+#                 rec.length += 1
+#                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
+#
+#                 # Form loss contribution (tensor)
+#                 # print(rec.history)
+#                 # print("OOGA BOOGA")
+#                 # traj_len = len(rec.history)
+#                 # # Add a safeguard against division by zero for empty or single-step histories
+#                 # if traj_len == 0:
+#                 #     traj_len = 1
+#
+#                 # advantage term: -(1/N) * Σ_i A_i Σ_t logp
+#                 # normalized by trajectory length
+#                 # advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
+#
+#                 # advantage_term = -(rec.advantage / N) * chosen_logp
+#
+#                 entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
+#                 contrib -= entropy_term
+#
+#                 total_entropy += entropy.detach().cpu().item()
+#                 # total_entropy += entropy
+#
+#                 # print("advantage: ", advantage_term.item())
+#                 # print("entropy: ", entropy_term.item())
+#
+#                 # contrib = advantage_term
+#
+#                 if scaler is not None:
+#                     # Accumulate as Python float; we will wrap in a tensor at backward time
+#                     loss_batch += float(contrib.detach().cpu())
+#                 else:
+#                     loss_batch = loss_batch + contrib
+#
+#                 # Advance environment
+#                 clone.take_action(action)
+#                 cursors[local_idx] += 1
+#                 if clone.synthesis_done or cursors[local_idx] >= len(rec.history):
+#                     finished[local_idx] = True
+#
+#             # Single backward for this step
+#             if scaler is not None:
+#                 loss_batch_tensor = torch.tensor(loss_batch, device=device, dtype=head0.dtype, requires_grad=True)
+#                 scaler.scale(loss_batch_tensor).backward()
+#             else:
+#                 loss_batch.backward()
+#
+#     # Finish optimizer step
+#
+#     if scaler is not None:
+#         if clip_val and clip_val > 0:
+#             scaler.unscale_(optimizer)
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
+#         scaler.step(optimizer)
+#         scaler.update()
+#     else:
+#         if clip_val and clip_val > 0:
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_val)
+#         optimizer.step()
+#
+#     mean_entropy = total_entropy / step_count if step_count > 0 else 0.0
+#     # Compute logged policy loss
+#     # policy_loss_value = -(1.0 / N) * sum_adv_logp
+#     return total_ppo_loss, mean_entropy
 
 
 def compute_policy_loss_for_logging(records: List[TrajectoryRecord]) -> float:

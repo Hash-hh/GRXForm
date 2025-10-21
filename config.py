@@ -82,7 +82,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 10000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 2000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -147,10 +147,10 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_iid_mc_64_samples"
+        self.wandb_run_name = f"{self.objective_type}_wor_64_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
