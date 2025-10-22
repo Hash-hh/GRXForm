@@ -86,11 +86,12 @@ class MoleculeConfig:
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
-        self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
+        self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
+        # self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
 
         # Optimizer
         self.optimizer = {
-            "lr": 5e-5,  # learning rate
+            "lr": 1e-4,  # learning rate
             "weight_decay": 0,
             "gradient_clipping": 1.,  # Clip gradient to given L2-norm. Set to 0 if no clipping should be performed.
             "schedule": {
@@ -154,14 +155,15 @@ class MoleculeConfig:
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
-        self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
+        self.use_dr_grpo = False  # Enable RL fine-tuning (vs pure supervised)
 
         self.ppo_epochs = 1  # Number of GRPO iterations per RL update, for now keep 1 for simplicity (REINFORCE with baseline)
 
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
 
         # self.rl_entropy_beta = 0.0
-        self.rl_entropy_beta = 0.001
+        self.rl_entropy_beta = 0.0015
+        # self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
