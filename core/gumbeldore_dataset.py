@@ -26,6 +26,7 @@ from config import MoleculeConfig
 from molecule_evaluator import MoleculeObjectiveEvaluator
 
 
+
 @ray.remote
 class JobPool:
     def __init__(self, problem_instances: List[Instance]):
@@ -86,12 +87,18 @@ class GumbeldoreDataset:
             affinity = list(os.sched_getaffinity(0))
             cpu_cores = [affinity[i % len(cpu_cores)] for i in range(len(self.devices_for_workers))]
 
+        # for complex objectives, we pass the evaluator to the worker to avoid loading it multiple times
+        evaluator_to_pass = None
+        if "prodrug" in self.config.objective_type or "bpa" in self.config.objective_type:
+            evaluator_to_pass = self.objective_evaluator
+
         # Kick off workers
         future_tasks = [
             async_sbs_worker.remote(
                 self.config, job_pool, network_weights, device,
                 batch_size_gpu if device != "cpu" else batch_size_cpu,
-                cpu_cores[i], best_objective, memory_aggressive
+                cpu_cores[i], best_objective, memory_aggressive,
+                evaluator_to_pass
             )
             for i, device in enumerate(self.devices_for_workers)
         ]
@@ -192,6 +199,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                      cpu_core: Optional[int] = None,
                      best_objective: Optional[float] = None,
                      memory_aggressive: bool = False,
+                     objective_evaluator: MoleculeObjectiveEvaluator = None
                      ):
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
         return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
@@ -225,7 +233,8 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         network.to(network.device)
         network.eval()
 
-        objective_evaluator = MoleculeObjectiveEvaluator(config, torch.device(config.objective_gnn_device))
+        if objective_evaluator is None:
+            objective_evaluator = MoleculeObjectiveEvaluator(config, torch.device(config.objective_gnn_device))
 
         while True:
             batch = ray.get(job_pool.get_jobs.remote(batch_size))

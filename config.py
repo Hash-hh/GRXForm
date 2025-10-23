@@ -54,9 +54,11 @@ class MoleculeConfig:
             "I": {"allowed": True, "atomic_number": 53, "valence": 1}
         }
 
-        self.start_from_c_chains = True
+        self.start_from_c_chains = False
         self.start_c_chain_max_len = 1
-        self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
+        # self.start_from_smiles = 'C1=NC2=C(N1COCCO)N=C(NC2=O)N'  # ACYCLOVIR SMILES
+        self.start_from_smiles = 'c1cc(ccc1Cc2ccc(cc2)O)O'  # BPA LCD
+        # self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
         # Positive value x, where the actual objective with our molecule score will be set to obj = score - x * SA_score
         self.synthetic_accessibility_in_objective_scale = 0
@@ -66,19 +68,30 @@ class MoleculeConfig:
         # Objective molecule predictor
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
         self.GHGNN_hidden_dim = 113
-        self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "bpa"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "prodrug_acyclovir"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
+        # Hyperparameters (weights) for the prodrug objective function (only used if objective_type=="prodrug_acyclovir")
+        self.prodrug_objective_weights = {
+            "w_amino_acid": 15.0,
+            "w_perm": 2.0,
+            "w_sol": 0.5,
+            "w_herg": -10.0,
+            "w_sa": -0.5,
+            "w_qed": 1.0,
+        }
 
         # Loading trained checkpoints to resume training or evaluate
-        self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = 'data/pretrain_weights.pt'  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
         self.num_dataloader_workers = 3  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
-        self.training_device = "cpu"  # Device on which to perform the supervised training
+        self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
@@ -98,14 +111,15 @@ class MoleculeConfig:
 
         # Self-improvement sequence decoding
         self.gumbeldore_config = {
-            # Number of trajectories with the the highest objective function evaluation to keep for training
+            # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 100,
-            "keep_intermediate_trajectories": True,  # if True, we consider all intermediate, terminable trajectories
-            "devices_for_workers": ["cpu"] * 1,
+            "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
+            "devices_for_workers": ["cuda:0"] * 1,
+            # "devices_for_workers": ["cpu"] * 1,
             "destination_path": "./data/generated_molecules.pickle",
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
-            "search_type": "tasar",
+            "search_type": "tasar",  # 'wor'
             "beam_width": 32,
             "replan_steps": 12,
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -119,3 +133,7 @@ class MoleculeConfig:
                                          datetime.datetime.now().strftime(
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
+
+        # Wandb logging
+        self.wandb_enable = True
+

@@ -155,12 +155,15 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Experiment')
     parser.add_argument('--config', help="Path to optional config relative to main.py")
+    parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging (for debugging)')
     args = parser.parse_args()
 
     if args.config is not None:
         # Load config from given path
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
     config = MoleculeConfig()
+    if hasattr(args, 'no_wandb') and args.no_wandb:
+        config.wandb_enable = False
 
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
     ray.init(num_gpus=num_gpus, logging_level="info",
@@ -168,7 +171,7 @@ if __name__ == '__main__':
              )
     print(ray.available_resources())
 
-    logger = Logger(args, config.results_path, config.log_to_file)
+    logger = Logger(args, config.results_path, config.log_to_file, wandb_enable=config.wandb_enable)
     logger.log_hyperparams(config)
     # Fix random number generator seed for better reproducibility
     np.random.seed(config.seed)
@@ -255,6 +258,9 @@ if __name__ == '__main__':
             checkpoint["validation_metric"] = val_metric
             save_checkpoint(checkpoint, "last_model.pt", config)
 
+            # Log checkpoint to wandb
+            logger.log_model_checkpoint(os.path.join(config.results_path, "last_model.pt"), is_best=False)
+
             if val_metric > best_validation_metric:
                 print(">> Got new best model.")
                 checkpoint["best_model_weights"] = copy.deepcopy(checkpoint["model_weights"])
@@ -262,6 +268,9 @@ if __name__ == '__main__':
                 best_model_weights = checkpoint["best_model_weights"]
                 best_validation_metric = val_metric
                 save_checkpoint(checkpoint, "best_model.pt", config)
+
+                # Log best model checkpoint to wandb
+                logger.log_model_checkpoint(os.path.join(config.results_path, "best_model.pt"), is_best=True)
 
             if start_time_counter is not None and time.perf_counter() - start_time_counter > config.wall_clock_limit:
                 print("Time exceeded. Stopping training.")
@@ -290,3 +299,6 @@ if __name__ == '__main__':
 
     print("Finished. Shutting down ray.")
     ray.shutdown()
+
+    # Finish wandb logging
+    logger.finish()

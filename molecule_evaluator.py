@@ -17,6 +17,8 @@ from rdkit.Contrib.SA_Score import sascorer
 from molecule_design import MoleculeDesign
 from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_dataloader_pairs_T, sys2graph, atom_features, n_atom_features, n_bond_features
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
+from objective_predictor.Prodrug.objective import ProdrugObjectiveScorer
+from objective_predictor.bpa.objective import BPA_Alternative_Scorer
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
 
@@ -35,6 +37,16 @@ class PredictorWorker:
         self.config = config
         self.model = self._load_model()
 
+        # Prodrug ---
+        # If the objective type contains "prodrug", each parallel worker will
+        # create its own instance of the scorer, loading the models into its memory.
+        if "prodrug" in config.objective_type:
+            self.prodrug_scorer = ProdrugObjectiveScorer(config)
+
+        # BPA alternative scorer
+        if "bpa" in config.objective_type:
+            self.bpa_alternative_scorer = BPA_Alternative_Scorer(config)
+
         # Pre-calculate molecules from SMILES:
         self.pre_molecules = {
             "COC1=CC(=CC(=C1)C=O)OC": Chem.MolFromSmiles("COC1=CC(=CC(=C1)C=O)OC"),
@@ -45,6 +57,19 @@ class PredictorWorker:
         }
 
     def predict_objectives_from_rdkit_mols(self, feasible_molecules: List[Chem.RWMol]):
+
+        # --- PRODRUG SCORER ---
+        # This is the routing logic. If the config specifies a prodrug objective,
+        # we use our custom scorer. Otherwise, the code proceeds as before.
+        if "prodrug" in self.config.objective_type:
+            # The prodrug_scorer is already loaded and ready in each worker.
+            return self.prodrug_scorer(feasible_molecules)
+
+        # --- BPA ALTERNATIVE SCORER ---
+        if "bpa" in self.config.objective_type:
+            smiles_list = [Chem.MolToSmiles(mol) for mol in feasible_molecules]
+            return self.bpa_alternative_scorer(smiles_list)
+
         constraint_value = self.predict_constraint(feasible_molecules)  # must be exp(.) > 4
         if self.config.objective_type == "DMBA_TMB":
             ln_y_DMBA_solv = self.predict_IDAC(l_solvent=feasible_molecules,

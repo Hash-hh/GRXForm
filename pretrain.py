@@ -110,13 +110,15 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Experiment')
     parser.add_argument('--config', help="Path to optional config relative to main.py")
+    parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging (for debugging)')
     args = parser.parse_args()
 
     if args.config is not None:
         # Load config from given path
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
-
     config = MoleculeConfig()
+    if hasattr(args, 'no_wandb') and args.no_wandb:
+        config.wandb_enable = False
     print(f"Results path: {config.results_path}")
     config.max_num_atoms = None
     config.training_device = training_device
@@ -219,3 +221,6 @@ if __name__ == '__main__':
                 print(">> Got new best model.")
                 checkpoint["pretrain_best_validation_loss"] = generated_loggable_dict["full_loss"]
                 save_checkpoint(checkpoint, "best_model.pt", config)
+
+    # Finish wandb logging
+    logger.finish()

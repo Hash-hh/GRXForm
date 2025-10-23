@@ -28,7 +28,7 @@ class RandomMoleculeDataset(Dataset):
     all actions will be performed. Then, ending up at action index 0, we take the next item in the action seq
     (which corresponds to a list all actions that need to be taken from index to index) as training target.
     As the number of atoms will be different for molecules in a batch, we pad the atoms, and set all labels corresponding
-    to the padded atoms to -1 (in the CE-loss, this will be specified as `ignore_index=-1`.
+    to the padded atoms to -1 (in the CE-loss, this will be specified as `ignore_index=-1`).
     """
     def __init__(self, config: MoleculeConfig, path_to_pickle: str, batch_size: int, custom_num_batches: Optional[int],
                  no_random: bool = False):
