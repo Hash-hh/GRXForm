@@ -637,6 +637,9 @@ class MoleculeDesign(BaseTrajectory):
             for i in range(num_c_to_add):
                 mol.take_action(carbon_atom_idx)  # choose to add C at level 0
                 mol.take_action(len(mol.atoms) - 3)  # attach to last added atom
+
+                # CORRECTION: Level 2: choose bond order (single bond -> action 0)
+                mol.take_action(0)
             instance_list.append(mol)
         return instance_list
 
