@@ -162,8 +162,8 @@ class MoleculeConfig:
         self.rl_ppo_clip_epsilon = 0.2  # PPO clipping parameter
 
         # self.rl_entropy_beta = 0.0
-        self.rl_entropy_beta = 0.0015
-        # self.rl_entropy_beta = 0.001
+        # self.rl_entropy_beta = 0.0015
+        self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus

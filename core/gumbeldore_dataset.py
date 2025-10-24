@@ -492,7 +492,11 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                 for j, result_idx in enumerate(idx_list):
                     # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
                     #     :config.gumbeldore_config["num_trajectories_to_keep"]]]
-                    result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                    if config.gumbeldore_config["search_type"] == "wor":
+                        result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                    elif config.gumbeldore_config["search_type"] == "tasar":
+                        result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
+                            :config.gumbeldore_config["num_trajectories_to_keep"]]]
                     # we need to sample a diverse set from the leaves beam_leaves_batch[j] which is already sorted in
                     # descending order based on objective as expected by _sample_diverse_from_sorted
                     # result: List[MoleculeDesign] = _sample_diverse_from_sorted(result,

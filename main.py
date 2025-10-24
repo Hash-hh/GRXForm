@@ -27,16 +27,11 @@ from molecule_evaluator import MoleculeObjectiveEvaluator
 from rl_updates import dr_grpo_update, TrajectoryRecord
 
 
-
-
-
 def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     os.makedirs(config.results_path, exist_ok=True)
     path = os.path.join(config.results_path, filename)
     torch.save(checkpoint, path)
 
-
-# ---------------- Supervised (original) epoch ---------------- #
 def train_for_one_epoch_supervised(epoch: int,
                                    config: MoleculeConfig,
                                    network: MoleculeTransformer,
@@ -142,74 +137,6 @@ def train_for_one_epoch_supervised(epoch: int,
     del metrics["top_20_molecules"]
     return metrics, top_20_molecules
 
-
-def train_for_one_epoch_hybrid(epoch: int,
-                               config: MoleculeConfig,
-                               network: MoleculeTransformer,
-                               network_weights: dict,
-                               optimizer: torch.optim.Optimizer,
-                               objective_evaluator: MoleculeObjectiveEvaluator):
-    """
-    Performs one hybrid epoch of RL + IL, using a pickle file for the elite buffer.
-    """
-    # ====== 1. GENERATION & RL UPDATE STEP (Explore) ======
-    print(f"[Hybrid Epoch {epoch + 1}] Starting RL Exploration Step...")
-    gumbeldore_dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
-
-    generated_trajectories = gumbeldore_dataset.generate_dataset(
-        network_weights=network_weights, best_objective=None, memory_aggressive=False
-    )
-
-    if not generated_trajectories:
-        print("[RL] WARNING: No trajectories generated. Skipping RL and IL updates.")
-        return {"skipped": True}, ["No molecules this epoch"], []
-
-    network.train()
-    if config.freeze_all_except_final_layer:
-        # Set trainable layers for RL update
-        for p in network.parameters(): p.requires_grad = False
-        network.virtual_atom_linear.weight.requires_grad = True
-        network.virtual_atom_linear.bias.requires_grad = True
-        network.bond_atom_linear.weight.requires_grad = True
-        network.bond_atom_linear.bias.requires_grad = True
-
-    # Remember to return the records from dr_grpo_update
-    rl_metrics, rl_records = dr_grpo_update(
-        model=network, optimizer=optimizer, designs=generated_trajectories,
-        config=config, device=torch.device(config.training_device), logger=None
-    )
-    print("[RL] DR-GRPO update complete.")
-
-    # ====== 2. UPDATE ELITE BUFFER (on disk) ======
-    print(f"[Hybrid Epoch {epoch + 1}] Updating elite buffer pickle...")
-    updated_elite_records_as_dicts = update_elite_buffer_pickle(rl_records, config)
-
-    # ====== 3. IMITATION LEARNING UPDATE STEP (Distill) ======
-    il_metrics = {}
-    if getattr(config, "rl_use_il_distillation", False):
-        print(f"[Hybrid Epoch {epoch + 1}] Starting IL Distillation Step...")
-        il_metrics = perform_il_update(
-            config.gumbeldore_config["destination_path"], network, optimizer, config
-        )
-
-    # ====== 4. COMBINE METRICS AND RETURN ======
-    combined_metrics = {**rl_metrics, **il_metrics}
-    combined_metrics["best_gen_obj"] = combined_metrics.get("best_objective", float("-inf"))
-
-    print(f"[Hybrid] RL_reward_mean={rl_metrics.get('mean_reward', float('nan')):.4f}  "
-          f"RL_policy_loss={rl_metrics.get('policy_loss', float('nan')):.6f}  "
-          f"IL_distill_loss={il_metrics.get('il_loss', float('nan')):.4f}")
-
-    # Create top 20 text artifact from the elite buffer for logging
-    top_20_text_lines = []
-    for i, entry in enumerate(updated_elite_records_as_dicts[:20]):
-        top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
-    if not top_20_text_lines:
-        top_20_text_lines.append("No molecules in elite buffer")
-
-    return combined_metrics, top_20_text_lines, updated_elite_records_as_dicts
-
-# ---------------- RL (Dr. GRPO) epoch ---------------- #
 def train_for_one_epoch_rl(epoch: int,
                            config: MoleculeConfig,
                            network: MoleculeTransformer,
@@ -296,8 +223,6 @@ def train_for_one_epoch_rl(epoch: int,
 
     return metrics, top_20_text_lines
 
-
-# ---------------- Evaluation ---------------- #
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
     """
@@ -322,135 +247,6 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print(f"Eval ({eval_type}) mean top 20 obj: {metrics[f'{eval_type}_mean_top_20_obj']:.3f}")
 
     return metrics, top_20_mols
-
-
-def update_elite_buffer_pickle(new_records: List[TrajectoryRecord], config: MoleculeConfig) -> List[dict]:
-    """
-    Loads an elite buffer from a pickle file, merges new trajectory records,
-    sorts/truncates, and saves it back to the file. Mimics original GraphXForm logic.
-
-    Returns:
-        The updated elite buffer as a list of dictionaries, ready for dataset loading.
-    """
-    destination_path = config.gumbeldore_config["destination_path"]
-    capacity = config.gumbeldore_config["num_trajectories_to_keep"]
-
-    # 1. Load existing buffer from disk, if it exists.
-    existing_mols_by_smiles = {}
-    if os.path.isfile(destination_path):
-        try:
-            with open(destination_path, "rb") as f:
-                # The file stores a list of dictionaries
-                existing_mols = pickle.load(f)
-                for mol_dict in existing_mols:
-                    existing_mols_by_smiles[mol_dict["smiles"]] = mol_dict
-        except (EOFError, pickle.UnpicklingError):
-            print(f"[Warning] Could not read existing buffer at {destination_path}. Starting fresh.")
-
-    # 2. Convert new TrajectoryRecord objects to the same dict format and merge.
-    for r in new_records:
-        smiles = r.design.smiles_string
-        if smiles is None:
-            continue
-
-        # If the new record is better, add/replace it.
-        if smiles not in existing_mols_by_smiles or r.reward > existing_mols_by_smiles[smiles]["obj"]:
-            existing_mols_by_smiles[smiles] = {
-                "start_atom": r.design.initial_atom,
-                "action_seq": r.history,
-                "smiles": smiles,
-                "obj": r.reward
-                # "sa_score": r.design.sa_score # You can add this back if needed
-            }
-
-    # 3. Sort, truncate, and save back to disk.
-    all_records_as_dicts = sorted(
-        list(existing_mols_by_smiles.values()),
-        key=lambda x: x["obj"],
-        reverse=True
-    )
-    truncated_records = all_records_as_dicts[:capacity]
-
-    with open(destination_path, "wb") as f:
-        pickle.dump(truncated_records, f)
-
-    print(f"  Elite buffer updated. Size: {len(truncated_records)}. "
-          f"Best obj: {truncated_records[0]['obj']:.4f}" if truncated_records else "Buffer is empty.")
-
-    return truncated_records
-
-
-def perform_il_update(destination_path: str,
-                      network: MoleculeTransformer,
-                      optimizer: torch.optim.Optimizer,
-                      config: MoleculeConfig):
-    """
-    Performs one epoch of supervised Imitation Learning (CEM-SIL style)
-    by loading data from the specified pickle file.
-    """
-    if not os.path.exists(destination_path):
-        print("[IL] Elite buffer pickle file not found. Skipping IL update step.")
-        return {"il_loss": 0.0}
-
-    # Uses existing config parameters as requested
-    dataset = RandomMoleculeDataset(
-        config,
-        path_to_pickle=destination_path,
-        batch_size=config.batch_size_training,
-        custom_num_batches=config.num_batches_per_epoch
-    )
-
-    if len(dataset) == 0:
-        print("[IL] Could not create any training batches from elite buffer. Skipping IL update step.")
-        return {"il_loss": 0.0}
-
-    # The rest of this function is identical to the previous version
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True,
-                            num_workers=config.num_dataloader_workers, pin_memory=True)
-
-    network.train()
-    if config.freeze_all_except_final_layer:
-        for p in network.parameters():
-            p.requires_grad = False
-        network.virtual_atom_linear.weight.requires_grad = True
-        network.virtual_atom_linear.bias.requires_grad = True
-        network.bond_atom_linear.weight.requires_grad = True
-        network.bond_atom_linear.bias.requires_grad = True
-
-    total_loss = 0.0
-    for data in tqdm(dataloader, desc="IL Update"):
-        input_data = {k: v[0].to(network.device) for k, v in data["input"].items()}
-        target_zero = data["target_zero"][0].to(network.device)
-        target_one = data["target_one"][0].to(network.device)
-        target_two = data["target_two"][0].to(network.device)
-
-        logits_zero, logits_one, logits_two = network(input_data)
-
-        logits_zero[input_data["feasibility_mask_level_zero"]] = float("-inf")
-        logits_one[input_data["feasibility_mask_level_one"]] = float("-inf")
-        logits_two[input_data["feasibility_mask_level_two"]] = float("-inf")
-
-        criterion = CrossEntropyLoss(reduction="mean", ignore_index=-1)
-        loss_zero = criterion(logits_zero, target_zero)
-        loss_one = criterion(logits_one, target_one)
-        loss_two = criterion(logits_two, target_two)
-        loss = (torch.nan_to_num(loss_zero) +
-                config.scale_factor_level_one * torch.nan_to_num(loss_one) +
-                config.scale_factor_level_two * torch.nan_to_num(loss_two))
-
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-
-        if config.optimizer["gradient_clipping"] > 0:
-            torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=config.optimizer["gradient_clipping"])
-
-        optimizer.step()
-        total_loss += loss.item()
-
-    avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else 0.0
-    print(f"[IL] Imitation Learning update complete. Average Loss: {avg_loss:.4f}")
-    return {"il_loss": avg_loss}
-
 
 if __name__ == '__main__':
     print(">> Molecule Design")
@@ -689,7 +485,6 @@ if __name__ == '__main__':
 
             logger.log_metrics(generated_loggable_dict, step=epoch)
 
-            # --- METRIC & CHECKPOINT LOGIC ---
             # First, update the overall best metric
             if val_metric > best_validation_metric:
                 print(">> Got new best model.")
@@ -698,12 +493,15 @@ if __name__ == '__main__':
                 checkpoint["best_validation_metric"] = best_validation_metric
                 save_checkpoint(checkpoint, "best_model.pt", config)
 
-            # --- WANDB LOGGING (NOW USES UPDATED METRIC) ---
+            # WandB logging
             if hasattr(config, 'use_wandb') and config.use_wandb:
                 wandb_log = {
                     "epoch": checkpoint["epochs_trained"],
-                    "best_epoch_objective": val_metric,
-                    "best_overall_objective": best_validation_metric,
+                    "best_all_time_obj": best_validation_metric,
+                    "best_current_obj": val_metric,
+                    'mean_current_obj': generated_loggable_dict.get('mean_best_gen_obj'),
+                    'worst_current_obj': generated_loggable_dict.get('worst_gen_obj'),
+                    "mean_top_20_all_time_obj": generated_loggable_dict.get("mean_top_20_obj"),
                     "learning_rate": scheduler.get_last_lr()[0]
                 }
                 # Add specific RL metrics if in RL mode
@@ -769,7 +567,7 @@ if __name__ == '__main__':
     logger.text_artifact(os.path.join(config.results_path, "test_top_20_molecules.txt"),
                          test_text_to_save)
 
-    # --- WANDB FINISH ---
+    # WanB finish
     if hasattr(config, 'use_wandb') and config.use_wandb:
         wandb.finish()
 
