@@ -8,7 +8,7 @@ from typing import Optional, Tuple, List
 import torch
 import pickle
 import random
-import numpy as np
+# import numpy as np
 from torch.utils.data import Dataset
 
 from config import MoleculeConfig

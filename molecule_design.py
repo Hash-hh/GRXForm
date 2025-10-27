@@ -95,6 +95,9 @@ class MoleculeDesign(BaseTrajectory):
         # Current action level. Can be 0, 1, 2
         self.current_action_level = 0  # start by choosing <terminate>/<create new atom and pick>/<pick existing atom>
 
+        # Find the action index for creating a '*' atom (index 0 is terminate)
+        self.star_atom_action_idx = self.vocabulary_atom_names.index("*") + 1
+
         # The action mask indicates before each action what is feasible at the current level.
         # It is set for each level when transitioning to that level
         # A `1` indicates that the action should be masked, i.e., cannot be taken.
@@ -134,6 +137,14 @@ class MoleculeDesign(BaseTrajectory):
             # In principle only allow creating new atoms of types which can be chosen by the config
             # (where `allowed` is set to True)
             self.current_action_mask[1:ex_action_idx] = self.atom_feasibility_mask
+
+            # Count how many '*' atoms are already in the molecule.
+            # self.atoms stores the action index, so we check against our stored index.
+            star_atom_count = np.count_nonzero(self.atoms == self.star_atom_action_idx)
+            # If we already have 2, forbid creating another one.
+            if star_atom_count >= 2:
+                self.current_action_mask[self.star_atom_action_idx] = True  # Mask the action
+
             # Apart from this, creating a new atom is only possible if we haven't reached the max
             # number of atoms yet, and if there is still one free valence for an existing atom.
             if (self.upper_limit_atoms is not None and len(self.atoms) - 1 == self.upper_limit_atoms) or \
@@ -284,6 +295,12 @@ class MoleculeDesign(BaseTrajectory):
 
         if not self.infeasibility_flag:
             self.smiles_string = Chem.MolToSmiles(self.rdkit_mol)
+            if "*" in self.smiles_string:
+                # This is a safe replacement. MolToSmiles does not use '*'
+                # for anything other than a dummy atom (atomic_number=0).
+                self.smiles_string = self.smiles_string.replace('*', '[*]')
+
+            # print(self.smiles_string)
 
             if self.smiles_string == "C":
                 self.infeasibility_flag = True

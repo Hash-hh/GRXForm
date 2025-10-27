@@ -5,8 +5,10 @@ import numpy as np
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from tdc.single_pred import Tox
-from tdc.oracles import Oracle
+
+# from tdc.single_pred import Tox
+# from tdc.oracles import Oracle
+
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 
 # --- Setup and Configuration ---

@@ -4,8 +4,10 @@ import joblib
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from tdc.single_pred import ADME, Tox
-from tdc.oracles import Oracle
+
+# from tdc.single_pred import ADME, Tox
+# from tdc.oracles import Oracle
+
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.metrics import r2_score, roc_auc_score
 

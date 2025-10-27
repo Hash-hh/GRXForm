@@ -1,5 +1,5 @@
 """
-Runs supervised pretraining on the action sequences derived from a large dataset (e.g. ChEMBL).
+Runs supervised pretraining on the action sequences derived from a large dataset (e.g. ChemBL).
 """
 
 import argparse
@@ -96,12 +96,14 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
 
 
 if __name__ == '__main__':
-    pretrain_train_dataset = "./data/chembl/pretrain_sequences/chembl_train.pickle"
-    pretrain_val_dataset = "./data/chembl/pretrain_sequences/chembl_valid.pickle"
+    pretrain_train_dataset = "./data/polymer/pretrain_sequences/polymer_train.pickle"
+    pretrain_val_dataset = "./data/polymer/pretrain_sequences/polymer_valid.pickle"
     pretrain_num_epochs = 1000
-    batch_size = 512
+    batch_size = 256
+    # batch_size = 512
     num_batches_per_epoch = 3000
-    batch_size_validation = 512
+    batch_size_validation = 256
+    # batch_size_validation = 512
     training_device = "cuda:0"  # Device on which to train.
     num_dataloader_workers = 10  # Number of dataloader workers for creating batches for training
     load_checkpoint_from_path = None

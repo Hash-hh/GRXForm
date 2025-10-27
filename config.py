@@ -51,7 +51,10 @@ class MoleculeConfig:
 
             "Cl": {"allowed": True, "atomic_number": 17, "valence": 1},
             "Br": {"allowed": True, "atomic_number": 35, "valence": 1},
-            "I": {"allowed": True, "atomic_number": 53, "valence": 1}
+            "I": {"allowed": True, "atomic_number": 53, "valence": 1},
+
+            # For polymer generation
+            "*": {"allowed": True, "atomic_number": 0, "valence": 1}
         }
 
         self.start_from_c_chains = False
@@ -68,8 +71,10 @@ class MoleculeConfig:
         # Objective molecule predictor
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
         self.GHGNN_hidden_dim = 113
+        self.polync_device = "cuda:0"
+        self.objective_type = "polync_tg"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "bpa"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "bpa"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "prodrug_acyclovir"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
@@ -85,7 +90,8 @@ class MoleculeConfig:
         }
 
         # Loading trained checkpoints to resume training or evaluate
-        self.load_checkpoint_from_path = 'data/pretrain_weights.pt'  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = 'model/poly_pretrained_best_model.pt'  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = 'model/weights.pt'  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
@@ -120,7 +126,7 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
             "search_type": "tasar",  # 'wor'
-            "beam_width": 32,
+            "beam_width": 128,
             "replan_steps": 12,
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.

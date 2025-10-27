@@ -12,6 +12,7 @@ from config import MoleculeConfig
 from molecule_design import MoleculeDesign
 from typing import Optional, Tuple, List
 from tqdm import tqdm
+import os
 
 datatypes = ["valid", "train"]
 limit_num_atoms = 100
@@ -21,8 +22,11 @@ for datatype in datatypes:
     molecules: List[Tuple[Chem.RWMol, str]] = []
     molecule_designs: List[dict] = []
 
-    path_to_smiles = f"./data/chembl/chembl_{datatype}_filtered.smiles"
-    destination_path = f"./data/chembl/pretrain_sequences/chembl_{datatype}.pickle"
+    path_to_smiles = f"./data/polymer/polymer_{datatype}_filtered.smiles"
+    destination_path = f"./data/polymer/pretrain_sequences/polymer_{datatype}.pickle"
+    # create the folder if it does not exist
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+
     limit_num_smiles_to = None  # Set to `None` to process all
 
     num_differing_smiles = 0
@@ -73,6 +77,7 @@ for datatype in datatypes:
                 continue
             if Chem.CanonSmiles(molecule_design.smiles_string) != Chem.CanonSmiles(smiles):
                 dont_match.append(Chem.CanonSmiles(smiles))
+                continue
             instance = dict(
                 start_atom=molecule_design.initial_atom,
                 action_seq=molecule_design.history,

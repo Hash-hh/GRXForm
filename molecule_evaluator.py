@@ -6,8 +6,10 @@ The MoleculeDesign.objective is set here after generation.
 import math
 from typing import List, Union
 import os
+import re
 import ray
 import torch
+from transformers import T5ForConditionalGeneration, T5Tokenizer
 import numpy as np
 import pandas as pd
 from config import MoleculeConfig
@@ -35,7 +37,27 @@ class PredictorWorker:
 
         self.device = device
         self.config = config
-        self.model = self._load_model()
+        # self.model = self._load_model()
+
+        if "polync" in self.config.objective_type:
+            if T5Tokenizer is None:
+                raise ImportError("Transformers library not found. Please install with: pip install transformers")
+            print(f"Worker loading PolyNC model onto {self.config.polync_device}...")
+            self.polync_device = torch.device(self.config.polync_device)
+            self.polync_tokenizer = T5Tokenizer.from_pretrained("hkqiu/PolyNC")
+            self.polync_model = T5ForConditionalGeneration.from_pretrained("hkqiu/PolyNC").to(self.polync_device)
+            self.polync_model.eval()
+            print("PolyNC model loaded.")
+
+        if self.config.objective_type in ["IBA", "DMBA_TMB"]:
+            # Load GHGNN only if needed
+            print(f"(PredictorWorker pid={os.getpid()}) Loading GHGNN model...")
+            self.model = self._load_model()
+            print("GHGNN model loaded.")
+            # Clear PolyNC attributes if they exist from a previous run (unlikely but safe)
+            self.polync_model = None
+            self.polync_tokenizer = None
+            self.polync_device = None
 
         # Prodrug ---
         # If the objective type contains "prodrug", each parallel worker will
@@ -56,8 +78,58 @@ class PredictorWorker:
             "CC(C)CO": Chem.MolFromSmiles("CC(C)CO")
         }
 
-    def predict_objectives_from_rdkit_mols(self, feasible_molecules: List[Chem.RWMol]):
+    def _parse_polync_output(self, text_output: str) -> float:
+        """
+        Parses the text output from PolyNC (e.g., "103.85 (°C)")
+        and returns the numerical value as a float.
+        """
+        try:
+            # This regex finds the first floating-point or integer number in the string
+            match = re.search(r"[-+]?\d*\.\d+|\d+", text_output)
+            if match:
+                return float(match.group(0))
+            else:
+                return -np.inf  # Return -inf if no number is found
+        except ValueError:
+            return -np.inf  # Return -inf on any parsing error
 
+    def predict_objectives_from_inputs(self, inputs: List[Union[Chem.RWMol, str]]) -> np.array:
+
+        # PolyNC objective logic. This must be the first check.
+        if "polync" in self.config.objective_type:
+            feasible_smiles = inputs  # Inputs are pSMILES strings
+            # print(feasible_smiles)
+
+            # 1. Create prompts
+            if self.config.objective_type == "polync_tg":
+                prompts = [f"Predict the Tg of the following SMILES: {s}" for s in feasible_smiles]
+            # Add other PolyNC properties here with 'elif'
+            # elif self.config.objective_type == "polync_ae":
+            #     prompts = [f"Predict the AE of the following SMILES: {s}" for s in feasible_smiles]
+            else:
+                raise ValueError(f"Unknown polync objective type: {self.config.objective_type}")
+
+            # 2. Tokenize, Generate, Decode in batch
+            try:
+                inputs = self.polync_tokenizer(
+                    prompts, return_tensors="pt", padding=True, truncation=True, max_length=150
+                ).to(self.polync_device)
+
+                with torch.no_grad():
+                    outputs = self.polync_model.generate(**inputs, max_new_tokens=8)  # Max 8 output tokens for a number
+
+                decoded_outputs = self.polync_tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+                # 3. Parse outputs
+                scores = [self._parse_polync_output(out) for out in decoded_outputs]
+                return np.array(scores)
+
+            except Exception as e:
+                print(f"Error during PolyNC prediction: {e}")
+                # Return -inf for all molecules in the batch if an error occurs
+                return np.array([-np.inf] * len(feasible_smiles))
+
+        feasible_molecules = inputs
         # --- PRODRUG SCORER ---
         # This is the routing logic. If the config specifies a prodrug objective,
         # we use our custom scorer. Otherwise, the code proceeds as before.
@@ -111,6 +183,8 @@ class PredictorWorker:
         Because this value was developed for drug-like (water-soluble) molecules, and we are designing water-insoluble
             molecules, this may not be useful in the end but worth trying
         """
+        if "polync" in self.config.objective_type:
+            return 0.0  # Return 0 for SA score for now.
         return sascorer.calculateScore(mol)
 
     def predict_constraint(self, l_mols: List[Chem.RWMol]) -> np.array:
@@ -197,7 +271,8 @@ class MoleculeObjectiveEvaluator:
     def __init__(self, config: MoleculeConfig, device: torch.device = None):
         self.config = config
         self.device = torch.device("cpu") if device is None else device
-        self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
+
+        # self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
         # initialize GuacaMol benchmarks
         guacamol_goal_directed_suite = goal_directed_suite_v2()
         self.guacamol_benchmarks = dict(
@@ -223,6 +298,16 @@ class MoleculeObjectiveEvaluator:
             scaffold_hop=guacamol_goal_directed_suite[19]
         )
 
+        # Only start workers if not using GuacaMol
+        if self.config.objective_type not in self.guacamol_benchmarks:
+            # For PolyNC, the worker needs the 'polync_device'. For old models, it uses 'objective_gnn_device'.
+            # We pass the 'objective_gnn_device' as the default 'device' argument,
+            # and the worker's __init__ will handle loading PolyNC to its own device.
+            worker_device = self.device if self.config.objective_type in ["IBA", "DMBA_TMB"] else torch.device("cpu")
+            self.predictor_workers = [PredictorWorker.remote(self.config, worker_device) for _ in
+                                      range(self.config.num_predictor_workers)]
+        ### --- END MODIFIED --- ###
+
     def predict_objective(self, molecule_designs: List[Union[MoleculeDesign, str]]) -> np.array:
         """
         Takes list of molecules (either as `MoleculeDesign` or directly as SMILES string
@@ -231,42 +316,64 @@ class MoleculeObjectiveEvaluator:
         """
         # Get molecules that are known to be feasible for the predictor / RDKit / by the constraints,
         # i.e., molecules that could be sanitized and are not single carbon atoms.
-        feasible_molecules: List[Chem.RWMol] = []
+
+        ### --- MODIFIED --- ###
+        # feasible_inputs will hold SMILES for PolyNC, or RWMol for other objectives
+        feasible_inputs: List[Union[Chem.RWMol, str]] = []
         feasible_idcs = []  # indices of feasible molecules in the original `molecule_designs` list
+        is_polync_obj = "polync" in self.config.objective_type
+        is_guacamol_obj = self.config.objective_type in self.guacamol_benchmarks
+        ### --- END MODIFIED --- ###
 
         for i, mol in enumerate(molecule_designs):
             if isinstance(mol, MoleculeDesign):
                 assert mol.synthesis_done
                 if not self.infeasible_by_special_constraints(mol):
                     feasible_idcs.append(i)
-                    feasible_molecules.append(mol.rdkit_mol)
+                    ### --- MODIFIED --- ###
+                    if is_polync_obj or is_guacamol_obj:
+                        feasible_inputs.append(mol.smiles_string)  # Pass the finalized pSMILES string
+                    else:
+                        feasible_inputs.append(mol.rdkit_mol)  # Pass the RWMol object for old models
+                    ### --- END MODIFIED --- ###
             elif mol != "C":
-                # is a string
+                # is a string (This path is less likely for us but good to keep)
                 try:
-                    mol = Chem.MolFromSmiles(mol)
-                    Chem.SanitizeMol(mol)
-                    feasible_idcs.append(i)
-                    feasible_molecules.append(mol)
+                    ### --- MODIFIED --- ###
+                    if is_polync_obj:
+                        # For PolyNC, just check if it's a string and not "C".
+                        # We pass it directly, no RDKit check.
+                        feasible_idcs.append(i)
+                        feasible_inputs.append(mol)
+                    else:
+                        # For other objectives, they need RDKit objects
+                        mol_obj = Chem.MolFromSmiles(mol)
+                        Chem.SanitizeMol(mol_obj)
+                        feasible_idcs.append(i)
+                        feasible_inputs.append(mol_obj)
+                    ### --- END MODIFIED --- ###
                 except:
                     continue
 
-        if self.config.objective_type in self.guacamol_benchmarks:
-            # Drug design tasks
+        ### --- MODIFIED --- ###
+        if is_guacamol_obj:
+            # Drug design tasks (expects SMILES strings)
             objs = np.array([
-                self.guacamol_benchmarks[self.config.objective_type].objective.score(
-                    Chem.MolToSmiles(rdkit_mol)
-                )
-                for rdkit_mol in feasible_molecules
+                self.guacamol_benchmarks[self.config.objective_type].objective.score(smiles)
+                for smiles in feasible_inputs
             ])
         else:
-            # Distribute the list of feasible molecules to the predictor workers.
-            num_per_worker = math.ceil(len(feasible_molecules) / len(self.predictor_workers))
+            # Distribute the list of feasible inputs to the predictor workers.
+            num_per_worker = math.ceil(len(feasible_inputs) / len(self.predictor_workers))
             future_objs = [
-                worker.predict_objectives_from_rdkit_mols.remote(feasible_molecules[i * num_per_worker: (i+1) * num_per_worker])
+                worker.predict_objectives_from_inputs.remote(
+                    feasible_inputs[i * num_per_worker: (i + 1) * num_per_worker])
                 for i, worker in enumerate(self.predictor_workers)
             ]
             future_objs = ray.get(future_objs)
             objs = np.concatenate(future_objs)
+        ### --- END MODIFIED --- ###
+
         all_objs = np.array([-np.inf] * len(molecule_designs))
         all_objs[feasible_idcs] = objs
 
@@ -280,11 +387,17 @@ class MoleculeObjectiveEvaluator:
         if mol.infeasibility_flag:
             return True
 
-        try:
-            atoms = mol.rdkit_mol.GetAtoms()
-            node_f = [atom_features(atom) for atom in atoms]
-        except:
-            return True
+        # try:
+        #     atoms = mol.rdkit_mol.GetAtoms()
+        #     node_f = [atom_features(atom) for atom in atoms]
+        # except:
+        #     return True
+
+        if "polync" in self.config.objective_type:
+            mol_smiles = mol.smiles_string
+            star_atom_count = mol_smiles.count('*')
+            if star_atom_count != 2:
+                return True  # Infeasible
 
         if self.config.objective_type in ["IBA", "DMBA_TMB"] and self.config.include_structural_constraints:
             """

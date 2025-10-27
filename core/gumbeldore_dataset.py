@@ -89,7 +89,7 @@ class GumbeldoreDataset:
 
         # for complex objectives, we pass the evaluator to the worker to avoid loading it multiple times
         evaluator_to_pass = None
-        if "prodrug" in self.config.objective_type or "bpa" in self.config.objective_type:
+        if "prodrug" in self.config.objective_type or "bpa" in self.config.objective_type or "polync" in self.config.objective_type:
             evaluator_to_pass = self.objective_evaluator
 
         # Kick off workers
