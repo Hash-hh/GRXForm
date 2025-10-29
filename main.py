@@ -258,8 +258,8 @@ if __name__ == '__main__':
             checkpoint["validation_metric"] = val_metric
             save_checkpoint(checkpoint, "last_model.pt", config)
 
-            # Log checkpoint to wandb
-            logger.log_model_checkpoint(os.path.join(config.results_path, "last_model.pt"), is_best=False)
+            # # Log checkpoint to wandb
+            # logger.log_model_checkpoint(os.path.join(config.results_path, "last_model.pt"), is_best=False)
 
             if val_metric > best_validation_metric:
                 print(">> Got new best model.")
@@ -269,8 +269,8 @@ if __name__ == '__main__':
                 best_validation_metric = val_metric
                 save_checkpoint(checkpoint, "best_model.pt", config)
 
-                # Log best model checkpoint to wandb
-                logger.log_model_checkpoint(os.path.join(config.results_path, "best_model.pt"), is_best=True)
+                # # Log best model checkpoint to wandb
+                # logger.log_model_checkpoint(os.path.join(config.results_path, "best_model.pt"), is_best=True)
 
             if start_time_counter is not None and time.perf_counter() - start_time_counter > config.wall_clock_limit:
                 print("Time exceeded. Stopping training.")

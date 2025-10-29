@@ -85,7 +85,8 @@ class MoleculeConfig:
         }
 
         # Loading trained checkpoints to resume training or evaluate
-        self.load_checkpoint_from_path = 'data/pretrain_weights.pt'  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = 'data/pretrain_weights.pt'  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
@@ -135,5 +136,5 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # Wandb logging
-        self.wandb_enable = True
+        self.wandb_enable = False
 
