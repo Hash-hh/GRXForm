@@ -141,5 +141,5 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # Wandb logging
-        self.wandb_enable = True
+        self.wandb_enable = False
 

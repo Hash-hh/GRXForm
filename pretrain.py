@@ -99,10 +99,10 @@ if __name__ == '__main__':
     pretrain_train_dataset = "./data/polymer/pretrain_sequences/polymer_train.pickle"
     pretrain_val_dataset = "./data/polymer/pretrain_sequences/polymer_valid.pickle"
     pretrain_num_epochs = 1000
-    batch_size = 256
+    batch_size = 128
     # batch_size = 512
     num_batches_per_epoch = 3000
-    batch_size_validation = 256
+    batch_size_validation = 128
     # batch_size_validation = 512
     training_device = "cuda:0"  # Device on which to train.
     num_dataloader_workers = 10  # Number of dataloader workers for creating batches for training
@@ -183,10 +183,11 @@ if __name__ == '__main__':
         train_dataset = RandomMoleculeDataset(config, pretrain_train_dataset,
                                               batch_size=batch_size,
                                               custom_num_batches=num_batches_per_epoch)
-        val_dataset = RandomMoleculeDataset(config, pretrain_val_dataset,
-                                            batch_size=batch_size_validation,
-                                            custom_num_batches=None,
-                                            no_random=True)
+
+        # val_dataset = RandomMoleculeDataset(config, pretrain_val_dataset,
+        #                                     batch_size=batch_size_validation,
+        #                                     custom_num_batches=None,
+        #                                     no_random=True)
 
         for epoch in range(pretrain_num_epochs):
             print("Training.")
@@ -200,16 +201,16 @@ if __name__ == '__main__':
                   f" Avg loss level 2: {generated_loggable_dict['loss_level_two']}")
             logger.log_metrics(generated_loggable_dict, step=epoch)
 
-            print("Validating...")
-            torch.cuda.empty_cache()
-            with torch.no_grad():
-                validation_metrics = train_for_one_epoch(
-                    None, config, network, None, val_dataset, is_validation=True
-                )
-            logger.log_metrics(validation_metrics, step=epoch)
-            print(f">> Validation. Avg loss level 0: {validation_metrics['val_loss_level_zero']},"
-                  f" Avg loss level 1: {validation_metrics['val_loss_level_one']},"
-                  f" Avg loss level 2: {validation_metrics['val_loss_level_two']}")
+            # print("Validating...")
+            # torch.cuda.empty_cache()
+            # with torch.no_grad():
+            #     validation_metrics = train_for_one_epoch(
+            #         None, config, network, None, val_dataset, is_validation=True
+            #     )
+            # logger.log_metrics(validation_metrics, step=epoch)
+            # print(f">> Validation. Avg loss level 0: {validation_metrics['val_loss_level_zero']},"
+            #       f" Avg loss level 1: {validation_metrics['val_loss_level_one']},"
+            #       f" Avg loss level 2: {validation_metrics['val_loss_level_two']}")
 
             # Save model
             checkpoint["model_weights"] = copy.deepcopy(network.get_weights())
@@ -219,10 +220,10 @@ if __name__ == '__main__':
 
             save_checkpoint(checkpoint, "last_model.pt", config)
 
-            if validation_metrics["val_full_loss"] < checkpoint["pretrain_best_validation_loss"]:
-                print(">> Got new best model.")
-                checkpoint["pretrain_best_validation_loss"] = generated_loggable_dict["full_loss"]
-                save_checkpoint(checkpoint, "best_model.pt", config)
+            # if validation_metrics["val_full_loss"] < checkpoint["pretrain_best_validation_loss"]:
+            #     print(">> Got new best model.")
+            #     checkpoint["pretrain_best_validation_loss"] = generated_loggable_dict["full_loss"]
+            #     save_checkpoint(checkpoint, "best_model.pt", config)
 
     # Finish wandb logging
     logger.finish()
