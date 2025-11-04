@@ -1,16 +1,16 @@
-import os
-import warnings
-import joblib
 import numpy as np
-import pandas as pd
+import os
+import joblib
+import warnings
 from rdkit import Chem
-from rdkit.Chem import AllChem
-from tdc.single_pred import Tox
-from tdc.oracles import Oracle
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from rdkit.Chem import Descriptors, AllChem
+from rdkit.Contrib.SA_Score import sascorer
+# from tdc.Tox import Tox
+
+# We don't need tdc.Tox or tdc.Oracle for *prediction*,
+# only for the initial training (which you've already done).
 
 # --- Setup and Configuration ---
-
 warnings.filterwarnings("ignore")
 
 try:
@@ -18,11 +18,15 @@ try:
 except NameError:
     MODULE_DIR = os.getcwd()  # Fallback for interactive environments
 
+# Define the directory where your trained .pkl models are saved
 MODELS_DIR = os.path.join(MODULE_DIR, 'bpa_surrogate_models')
-DATA_DIR = os.path.join(MODULE_DIR, 'bpa_training_data')
+if not os.path.exists(MODELS_DIR):
+    print(f"Warning: Model directory not found at {MODELS_DIR}. "
+          f"Please ensure 'er_alpha_model.pkl' and 'ar_antagonist_model.pkl' are present.")
+    # We don't create it here, as the models should already exist.
 
 
-# --- Helper Functions ---
+# --- Helper Function ---
 
 def get_morgan_fingerprint(smiles_string):
     """Generates a Morgan fingerprint for a given SMILES string."""
@@ -33,280 +37,342 @@ def get_morgan_fingerprint(smiles_string):
     return np.array(fp)
 
 
-def normalize_value(value, min_val, max_val):
-    """Normalizes a value to a 0-1 scale."""
-    if max_val == min_val:
-        return 0.5  # Avoid division by zero
-    if value > max_val: return 1.0
-    if value < min_val: return 0.0
-    return (value - min_val) / (max_val - min_val)
-
-
-# --- The Main Scorer Class ---
-
-class BPA_Alternative_Scorer:
+class BPA_Scorer:
     """
-    A self-contained class to handle all objective scoring for BPA alternatives.
-    It's initialized once, loading all surrogate models into memory.
+    Calculates a reward for molecules as non-toxic BPA alternatives.
+
+    This version is optimized for:
+    - 70% Non-Toxicity (ER-alpha & AR binding)
+    - 30% Synthetic Accessibility (relative to BPA)
     """
 
-    def __init__(self, config=None):
-        print("Initializing BPA_Alternative_Scorer...")
-        self.config = config
+    def __init__(self, tdc_device='cpu'):  # tdc_device is unused, kept for API compatibility
+        print("Initializing BPA-Free Objective (Toxicity + SA)...")
 
         # --- 1. Define Model Paths ---
-        # We are only using models with real data for this demo.
         self.model_paths = {
             'er_alpha': os.path.join(MODELS_DIR, 'er_alpha_model.pkl'),
             'ar': os.path.join(MODELS_DIR, 'ar_antagonist_model.pkl'),
-
-            # TODO: Add paths for new models here as you train them
-            # 'tg': os.path.join(MODELS_DIR, 'tg_model.pkl'),
-            # 'modulus': os.path.join(MODELS_DIR, 'modulus_model.pkl'),
-            # 'gper1': os.path.join(MODELS_DIR, 'gper1_model.pkl'),
-            # 'err_gamma': os.path.join(MODELS_DIR, 'err_gamma_model.pkl'),
-            # 'persistence': os.path.join(MODELS_DIR, 'persistence_model.pkl'),
         }
 
-        # --- 2. Define *Relative* Weights for the Objective Function ---
-        # These represent relative importance. They will be normalized to sum to 1.
-        self.relative_weights = {
-            'w_sa': 1.0,  # Synthetic Accessibility
-            'w_er_alpha': 2.0,  # Estrogen Receptor (critical safety)
-            'w_ar': 2.0,  # Androgen Receptor (critical safety)
-
-            # TODO: Add weights for new objectives here
-            # 'w_tg': 1.0,
-            # 'w_modulus': 1.0,
-            # 'w_gper1': 1.5,
-            # 'w_err_gamma': 1.5,
-            # 'w_persistence': 1.0,
-        }
-
-        # --- Weight normalization ---
-        total_weight = sum(self.relative_weights.values())
-        self.weights = {key: val / total_weight for key, val in self.relative_weights.items()}
-        print(f"Using {len(self.weights)} objectives.")
-        print(f"Total relative weight: {total_weight:.1f}. Normalized weights used.")
-
-        # --- 3. Define Normalization Ranges for Each Objective ---
-        self.norm_ranges = {
-            'sa': (1, 10),  # Synthetic Accessibility Score (lower is better)
-
-            # TODO: Add normalization ranges for new regression models here
-            # 'tg': (-150, 500),      # Glass Transition Temp in °C
-            # 'modulus': (0, 10),     # Young's Modulus in GPa
-        }
-
-        # --- 4. Load Pre-trained Surrogate Models ---
+        # --- 2. Load Pre-trained Surrogate Models ---
         self.models = {}
-        print("Loading surrogate models...")
+        print("Loading surrogate toxicity models...")
         for name, path in self.model_paths.items():
-            try:
-                self.models[name] = joblib.load(path)
-            except FileNotFoundError:
-                raise RuntimeError(
-                    f"Model file not found: {path}. Please run this script directly to train models first.")
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Model file not found: {path}. "
+                    f"Please run the 'BPA_Alternative_Scorer' (your other objective file)"
+                    f" as a main script first to train and save the surrogate models."
+                )
+            # No try/except here, as requested. Will crash if loading fails.
+            self.models[name] = joblib.load(path)
 
-        # --- 5. Load TDC Oracle for Calculated Properties ---
-        self.sa_oracle = Oracle(name='SA')
-        print("✅ BPA_Alternative_Scorer initialized successfully.")
+        print(f"  Loaded {len(self.models)} surrogate models.")
 
-    def calculate_score(self, smiles):
-        """Calculates the full objective score for a single SMILES string."""
+        # --- 3. Calculate BPA SA Score Baseline ---
+        bpa_smiles = 'CC(C)(c1ccc(O)cc1)c2ccc(O)cc2'
+        bpa_mol = self._get_rdkit_mol(bpa_smiles)
+        if bpa_mol is None:
+            raise ValueError("Could not parse BPA SMILES for SA baseline.")
+        self.SA_BPA = sascorer.calculateScore(bpa_mol)
+        print(f"  BPA SA Score (Baseline): {self.SA_BPA:.4f}")
+
+        # --- 4. Define Reward Weights (Toxicity + SA) ---
+        # Total score = 70% * (Tox Score) + 30% * (SA Score)
+        # Tox Score = 50% * f_er + 50% * f_ar
+        # Final weights:
+        self.w_sa = 0.30
+        self.w_er = 0.35  # 0.7 * 0.5
+        self.w_ar = 0.35  # 0.7 * 0.5
+
+        print("✅ BPA-Free Objective (Toxicity + SA) initialized.")
+
+    def _get_rdkit_mol(self, smiles: str):
+        """Helper to safely get a valid RDKit molecule."""
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None
+            Chem.SanitizeMol(mol)
+            return mol
+        except Exception:
+            # Catch sanitization/parsing errors for invalid SMILES
+            return None
+
+    def _calculate_property_score(self, mol: Chem.Mol, smiles: str):
+        """Calculates the reward for chemical properties."""
+
+        # --- Toxicity Scores (f_tox) ---
         fp = get_morgan_fingerprint(smiles)
         if fp is None:
-            return 0.0  # Invalid SMILES should get the worst possible score
+            raise ValueError(f"Failed to get fingerprint for valid SMILES: {smiles}")
+
         fp = fp.reshape(1, -1)
 
-        # --- Get Raw Predictions from all models ---
-        raw_preds = {}
-        f = {}  # This holds the f_i(m) scores (0-1, higher is better)
+        # predict_proba(fp)[0][1] gets P(class 1 = toxic)
+        f_er = 1.0 - self.models['er_alpha'].predict_proba(fp)[0][1]
+        f_ar = 1.0 - self.models['ar'].predict_proba(fp)[0][1]
 
-        # --- Models (Classification) ---
-        # predict_proba(fp)[0][1] gets the probability of class 1 (the "bad" class)
-        raw_preds['er_alpha'] = self.models['er_alpha'].predict_proba(fp)[0][1]
-        raw_preds['ar'] = self.models['ar'].predict_proba(fp)[0][1]
+        # --- SA Score (f_sa) ---
+        # Reward is 1.0 if SA_mol <= SA_BPA.
+        # Reward decreases linearly to 0.0 as SA_mol approaches 10.0.
+        sa_score_raw = sascorer.calculateScore(mol)
 
-        # Transform: f(m) = 1 - probability_of_bad_class
-        f['er_alpha'] = 1.0 - raw_preds['er_alpha']
-        f['ar'] = 1.0 - raw_preds['ar']
+        # Calculate penalty only if score is worse (higher) than BPA's
+        sa_penalty = max(0.0, sa_score_raw - self.SA_BPA)
 
-        # --- Calculated Properties (Oracle) ---
-        raw_preds['sa'] = self.sa_oracle(smiles)
+        # Normalize penalty based on the range from BPA's score to the max (10.0)
+        penalty_range = 10.0 - self.SA_BPA
+        normalized_penalty = sa_penalty / penalty_range if penalty_range > 0 else 0.0
 
-        # Normalize & Transform: f(m) = 1 - normalized_score
-        f['sa'] = 1.0 - normalize_value(raw_preds['sa'], *self.norm_ranges['sa'])
+        f_sa = 1.0 - np.clip(normalized_penalty, 0.0, 1.0)
 
-        # --- TODO: Add predictions for new models here ---
-        # Example for a regression model (like Tg):
-        # raw_preds['tg'] = self.models['tg'].predict(fp)[0]
-        # f['tg'] = normalize_value(raw_preds['tg'], *self.norm_ranges['tg'])
+        # Combine property scores
+        score = (self.w_sa * f_sa) + (self.w_er * f_er) + (self.w_ar * f_ar)
+        return score
 
-        # Example for a classification model (like Persistence):
-        # raw_preds['persistence'] = self.models['persistence'].predict_proba(fp)[0][1]
-        # f['persistence'] = 1.0 - raw_preds['persistence']
-        # --- End TODO ---
+    def __call__(self, smiles_list: list) -> np.ndarray:
+        """Calculates the final objective score for a list of SMILES."""
 
-        # --- Calculate Final Weighted Score ---
-        # F(m) = sum(w_i * f_i(m))
-        final_score = (
-                self.weights['w_sa'] * f['sa'] +
-                self.weights['w_er_alpha'] * f['er_alpha'] +
-                self.weights['w_ar'] * f['ar']
+        final_scores = []
+        for smiles in smiles_list:
+            mol = self._get_rdkit_mol(smiles)
 
-            # TODO: Add new weighted scores to the sum here
-            # + self.weights['w_tg'] * f['tg']
-            # + self.weights['w_persistence'] * f['persistence']
-        )
-
-        return final_score
-
-    def __call__(self, smiles_list: list):
-        """Calculates scores for a batch of SMILES strings."""
-        scores = [self.calculate_score(smi) for smi in smiles_list]
-        return np.array(scores)
-
-
-# --- Model Training and Setup Function ---
-
-def train_and_save_models():
-    """
-    Checks if surrogate models exist. If not, it trains them using data
-    from TDC or placeholder CSV files and saves them to the models directory.
-    """
-    print("--- Checking for BPA Alternative Surrogate Models ---")
-    os.makedirs(MODELS_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    # --- Define model training tasks ---
-    # Only training models for which we have real data.
-    tasks = [
-        {
-            'name': 'er_alpha',  # For f_ERalpha
-            'path': os.path.join(MODELS_DIR, 'er_alpha_model.pkl'),
-            'type': 'classifier',
-            'source': 'tdc',
-            'dataset': 'Tox21',
-            'label_name': 'NR-ER-LBD'  # Estrogen Receptor Ligand Binding Domain
-        },
-        {
-            'name': 'ar',  # For f_AR
-            'path': os.path.join(MODELS_DIR, 'ar_antagonist_model.pkl'),
-            'type': 'classifier',
-            'source': 'tdc',
-            'dataset': 'Tox21',
-            'label_name': 'NR-AR'  # Androgen Receptor (agonist assay)
-        },
-
-        # TODO: Add new model training tasks here as you find data
-        # Example for a dummy CSV-based model:
-        # {
-        #     'name': 'tg',
-        #     'path': os.path.join(MODELS_DIR, 'tg_model.pkl'),
-        #     'type': 'regressor',
-        #     'source': 'csv',
-        #     'data_file': 'tg_data.csv',
-        #     'smiles_col': 'smiles',
-        #     'label_col': 'tg'
-        # },
-    ]
-
-    for task in tasks:
-        if not os.path.exists(task['path']):
-            print(f"Model for '{task['name']}' not found. Training new model...")
-
-            # --- Load Data ---
-            try:
-                if task['source'] == 'tdc':
-                    print(f"  -> Loading REAL data from TDC '{task['dataset']}' for target '{task['label_name']}'...")
-                    data = Tox(name=task['dataset'], label_name=task['label_name'])
-                    df = data.get_data()
-                    smiles_col, label_col = 'Drug', 'Y'
-                    df = df.dropna(subset=[label_col])  # Remove rows with missing labels
-                    print(f"  -> Found {len(df)} valid data points.")
-
-                elif task['source'] == 'csv':
-                    # This block is now a placeholder for when you add new CSV tasks
-                    data_path = os.path.join(DATA_DIR, task['data_file'])
-                    smiles_col, label_col = task['smiles_col'], task['label_col']
-
-                    if not os.path.exists(data_path):
-                        print(f"  -> WARNING: Data file '{task['data_file']}' not found.")
-                        print(f"  -> Creating a DUMMY placeholder file at '{data_path}'.")
-                        print(f"  -> PLEASE REPLACE THIS with your actual training data.")
-                        if task['type'] == 'regressor':
-                            dummy_data = {
-                                smiles_col: ['c1ccccc1', 'CC', 'CCO', 'c1cnccc1', 'C(=O)O', 'CCN'],
-                                label_col: [100, -50, 0, 150, 50, -20]
-                            }
-                        else:
-                            dummy_data = {
-                                smiles_col: ['c1ccccc1', 'CC', 'CCO', 'c1cnccc1', 'C[C@H](O)c1ccccc1',
-                                             'O=C(O)c1ccccc1'],
-                                label_col: [1, 0, 0, 1, 1, 0]
-                            }
-                        pd.DataFrame(dummy_data).to_csv(data_path, index=False)
-
-                    df = pd.read_csv(data_path)
-
-            except Exception as e:
-                print(f"  -> ERROR: Could not load data for '{task['name']}'. Skipping. Error: {e}")
+            # Handle invalid SMILES input robustly.
+            if mol is None:
+                final_scores.append(0.0)
                 continue
 
-                # --- Preprocess Data ---
-            df['fingerprint'] = df[smiles_col].apply(get_morgan_fingerprint)
-            df = df.dropna(subset=['fingerprint', label_col]).reset_index(drop=True)
+            # Calculate the property score
+            score_properties = self._calculate_property_score(mol, smiles)
 
-            X = np.array(df['fingerprint'].tolist())
-            y = df[label_col].values
+            # The final score IS the property score
+            final_score = score_properties
 
-            if len(X) < 1:
-                print("  -> ERROR: No data at all. Skipping.")
-                continue
+            # Ensure final score is non-negative
+            final_scores.append(max(0.0, final_score))
 
-            # --- Train Model ---
-            if task['type'] == 'regressor':
-                model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-            else:  # classifier
-                model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1, class_weight='balanced')
-
-            model.fit(X, y)
-
-            # --- Save Model ---
-            joblib.dump(model, task['path'])
-            print(f"✅ Saved '{task['name']}' model to {task.get('path')}")
-        else:
-            print(f"✅ Found existing model for '{task['name']}' at {task['path']}")
+        return np.array(final_scores)
 
 
-# --- Main Execution Block ---
+# --- Example Usage ---
+if __name__ == "__main__":
+    # This block is for testing.
+    # It assumes your models (er_alpha_model.pkl, ar_antagonist_model.pkl)
+    # already exist in the 'bpa_surrogate_models' directory.
 
-if __name__ == '__main__':
-    print("Running setup for BPA Alternative Scorer...")
-    # This will train and save the 2 real models from Tox21.
-    # It will download Tox21 data if needed, which may take a moment.
-    train_and_save_models()
-
-    print("\n--- Example Usage ---")
     try:
-        scorer = BPA_Alternative_Scorer()
+        scorer = BPA_Scorer()
 
         test_smiles = [
-            'CC(C)(c1ccc(O)cc1)c2ccc(O)cc2',  # Bisphenol A (BPA)
-            'O=S(=O)(c1ccc(O)cc1)c2ccc(O)cc2',  # Bisphenol S (BPS)
-            'C1C[C@@H]2[C@H](O1)C[C@H](O)CO2'  # Isosorbide (a safe bio-based alternative)
+            'CC(C)(c1ccc(O)cc1)c2ccc(O)cc2',  # Bisphenol A (BPA) - bad tox, perfect SA
+            'c1ccccc1',  # Benzene - good tox, good SA
+            'O-c1ccccc1-c2ccccc2-O',  # Biphenol - better tox, good SA
+            'O-c1cccc(O)c1',  # Resorcinol - good tox, good SA
+            'CCC',  # Propane - good tox, good SA
+            'CCO',  # Ethanol - good tox, good SA
+            'O-c1cc(C)ccc1-C(C)(C)-c2ccc(O)cc2'  # Complex - better tox, ok SA
         ]
 
-        # Calculate scores
         scores = scorer(test_smiles)
 
-        print("\n--- Scoring Results (Higher is Better) ---")
-        print(f"--- (Based on SA, ER-alpha, and AR only) ---")
+        print("\n--- Scoring Results (70% Tox, 30% SA, Higher is Better) ---")
         for smi, score in zip(test_smiles, scores):
             print(f"SMILES: {smi}\nScore: {score:.4f}\n")
 
+    except FileNotFoundError as e:
+        print("\n--- ERROR ---")
+        print(e)
+        print("Please run the 'BPA_Alternative_Scorer' (your other objective file)")
+        print("as a main script first to train and save the surrogate models.")
     except Exception as e:
-        print(f"\n--- ERROR during scorer initialization or use ---")
-        print(f"An error occurred: {e}")
-        print("This likely means a model failed to train or TDC data failed to download.")
+        print(f"\nAn unexpected error occurred: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+# import numpy as np
+# import os
+# import joblib
+# import warnings
+# from rdkit import Chem
+# from rdkit.Chem import Descriptors, AllChem
+# from rdkit.Contrib.SA_Score import sascorer
+#
+# # We don't need tdc.Tox or tdc.Oracle for *prediction*,
+# # only for the initial training (which you've already done).
+#
+# # --- Setup and Configuration ---
+# warnings.filterwarnings("ignore")
+#
+# try:
+#     MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+# except NameError:
+#     MODULE_DIR = os.getcwd()  # Fallback for interactive environments
+#
+# # Define the directory where your trained .pkl models are saved
+# MODELS_DIR = os.path.join(MODULE_DIR, 'bpa_surrogate_models')
+# if not os.path.exists(MODELS_DIR):
+#     print(f"Warning: Model directory not found at {MODELS_DIR}. "
+#           f"Please ensure 'er_alpha_model.pkl' and 'ar_antagonist_model.pkl' are present.")
+#     # We don't create it here, as the models should already exist.
+#
+#
+# # --- Helper Function ---
+#
+# def get_morgan_fingerprint(smiles_string):
+#     """Generates a Morgan fingerprint for a given SMILES string."""
+#     mol = Chem.MolFromSmiles(smiles_string)
+#     if mol is None:
+#         return None
+#     fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+#     return np.array(fp)
+#
+#
+# class BPA_Scorer:
+#     """
+#     Calculates a reward for molecules as non-toxic BPA alternatives.
+#
+#     This function is optimized *only* for non-toxicity based on
+#     Estrogen Receptor (ER-alpha) and Androgen Receptor (AR) binding.
+#     """
+#
+#     def __init__(self, tdc_device='cpu'):  # tdc_device is unused, kept for API compatibility
+#         print("Initializing BPA-Free Objective (Toxicity-Only)...")
+#
+#         # --- 1. Define Model Paths ---
+#         self.model_paths = {
+#             'er_alpha': os.path.join(MODELS_DIR, 'er_alpha_model.pkl'),
+#             'ar': os.path.join(MODELS_DIR, 'ar_antagonist_model.pkl'),
+#         }
+#
+#         # --- 2. Load Pre-trained Surrogate Models ---
+#         self.models = {}
+#         print("Loading surrogate toxicity models...")
+#         for name, path in self.model_paths.items():
+#             if not os.path.exists(path):
+#                 raise FileNotFoundError(
+#                     f"Model file not found: {path}. "
+#                     f"Please run the 'BPA_Alternative_Scorer' (your other objective file)"
+#                     f" as a main script first to train and save the surrogate models."
+#                 )
+#             # No try/except here, as requested. Will crash if loading fails.
+#             self.models[name] = joblib.load(path)
+#
+#         print(f"  Loaded {len(self.models)} surrogate models.")
+#
+#         # --- 3. Define Reward Weights ---
+#         # We are only optimizing properties
+#         self.W_PROPERTIES = 1.0
+#
+#         # --- Sub-weights for Properties (sum to 1.0) ---
+#         # Only include toxicity weights
+#         self.w_er = 0.5
+#         self.w_ar = 0.5
+#
+#         print("✅ BPA-Free Objective (Toxicity-Only) initialized.")
+#
+#     def _get_rdkit_mol(self, smiles: str):
+#         """Helper to safely get a valid RDKit molecule."""
+#         try:
+#             mol = Chem.MolFromSmiles(smiles)
+#             if mol is None:
+#                 return None
+#             Chem.SanitizeMol(mol)
+#             return mol
+#         except Exception:
+#             # Catch sanitization/parsing errors for invalid SMILES
+#             return None
+#
+#     def _calculate_property_score(self, mol: Chem.Mol, smiles: str):
+#         """Calculates the reward for chemical properties."""
+#
+#         # --- Toxicity Scores (f_tox) ---
+#         # We need a fingerprint for the surrogate models
+#         fp = get_morgan_fingerprint(smiles)
+#         if fp is None:
+#             # This should not happen if _get_rdkit_mol worked,
+#             # but as a safeguard, we raise an error.
+#             raise ValueError(f"Failed to get fingerprint for valid SMILES: {smiles}")
+#
+#         fp = fp.reshape(1, -1)
+#
+#         # No try/except block, as requested.
+#         # This will crash if prediction fails.
+#         # predict_proba(fp)[0][1] gets P(class 1 = toxic)
+#         f_er = 1.0 - self.models['er_alpha'].predict_proba(fp)[0][1]
+#         f_ar = 1.0 - self.models['ar'].predict_proba(fp)[0][1]
+#
+#         # --- SA Score (f_sa) ---
+#         # REMOVED
+#
+#         # Combine property scores
+#         score = (self.w_er * f_er) + (self.w_ar * f_ar)
+#         return score
+#
+#     def __call__(self, smiles_list: list) -> np.ndarray:
+#         """Calculates the final objective score for a list of SMILES."""
+#
+#         final_scores = []
+#         for smiles in smiles_list:
+#             mol = self._get_rdkit_mol(smiles)
+#
+#             # Handle invalid SMILES input robustly.
+#             # This is not a "silent failure" but correct input handling.
+#             if mol is None:
+#                 final_scores.append(0.0)
+#                 continue
+#
+#             # Calculate the property score
+#             score_properties = self._calculate_property_score(mol, smiles)
+#
+#             # The final score IS the property score
+#             final_score = score_properties
+#
+#             # Ensure final score is non-negative
+#             final_scores.append(max(0.0, final_score))
+#
+#         return np.array(final_scores)
+#
+#
+# # --- Example Usage ---
+# if __name__ == "__main__":
+#     # This block is for testing.
+#     # It assumes your models (er_alpha_model.pkl, ar_antagonist_model.pkl)
+#     # already exist in the 'bpa_surrogate_models' directory.
+#
+#     try:
+#         scorer = BPA_Scorer()
+#
+#         test_smiles = [
+#             'CC(C)(c1ccc(O)cc1)c2ccc(O)cc2',  # Bisphenol A (BPA) - should score poorly on tox
+#             'c1ccccc1',  # Benzene
+#             'O-c1ccccc1-c2ccccc2-O',  # Biphenol
+#             'O-c1cccc(O)c1',  # Resorcinol
+#             'CCC',  # Propane
+#             'CCO',  # Ethanol
+#             'O-c1cc(C)ccc1-C(C)(C)-c2ccc(O)cc2'  # Complex
+#         ]
+#
+#         scores = scorer(test_smiles)
+#
+#         print("\n--- Scoring Results (Toxicity-Only, Higher is Better) ---")
+#         for smi, score in zip(test_smiles, scores):
+#             print(f"SMILES: {smi}\nScore: {score:.4f}\n")
+#
+#     except FileNotFoundError as e:
+#         print("\n--- ERROR ---")
+#         print(e)
+#         print("Please run the 'BPA_Alternative_Scorer' (your other objective file)")
+#         print("as a main script first to train and save the surrogate models.")
+#     except Exception as e:
+#         print(f"\nAn unexpected error occurred: {e}")

@@ -2,7 +2,7 @@
 Provides functions to evaluate a completed molecule (validity checks, computing properties like QED or similarity, calling GuacaMol scoring functions, etc.) and assign the objective score.
 The MoleculeDesign.objective is set here after generation.
 """
-
+from rdkit.Chem import Fragments
 import math
 from typing import List, Union
 import os
@@ -18,7 +18,7 @@ from molecule_design import MoleculeDesign
 from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_dataloader_pairs_T, sys2graph, atom_features, n_atom_features, n_bond_features
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
 from objective_predictor.Prodrug.objective import ProdrugObjectiveScorer
-from objective_predictor.bpa.objective import BPA_Alternative_Scorer
+from objective_predictor.bpa.objective import BPA_Scorer
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
 
@@ -45,7 +45,7 @@ class PredictorWorker:
 
         # BPA alternative scorer
         if "bpa" in config.objective_type:
-            self.bpa_alternative_scorer = BPA_Alternative_Scorer(config)
+            self.bpa_alternative_scorer = BPA_Scorer(config)
 
         # Pre-calculate molecules from SMILES:
         self.pre_molecules = {
@@ -281,24 +281,95 @@ class MoleculeObjectiveEvaluator:
             return True
 
         try:
-            atoms = mol.rdkit_mol.GetAtoms()
-            node_f = [atom_features(atom) for atom in atoms]
+            # Basic RDKit object check
+            mol.rdkit_mol.GetAtoms()
         except:
-            return True
+            return True  # Failed to get atoms, treat as infeasible
 
-        if self.config.objective_type in ["IBA", "DMBA_TMB"] and self.config.include_structural_constraints:
+        # --- BPA-SPECIFIC STRUCTURAL CONSTRAINTS ---
+        if self.config.objective_type == "bpa" and self.config.include_structural_constraints:
+
+            ring_info = mol.rdkit_mol.GetRingInfo()
+            atom_rings = ring_info.AtomRings()
+            num_rings = len(atom_rings)
+
+            # 1. Must have at least two rings
+            if num_rings < 2:
+                return True  # Infeasible: Not enough rings
+
+            # 2. Rings must not be larger than 6 atoms (or smaller than 5)
+            for ring in atom_rings:
+                if len(ring) > 6 or len(ring) < 5:
+                    return True  # Infeasible: Ring size incorrect
+
+            # --- NEW -OH LOGIC (Robust) ---
+            # 3. Must have at least 2 leaf -OH groups ([OH;X1]) on *different* rings
+
+            # Count aliphatic hydroxyls (alcohols)
+            aliphatic_oh = Fragments.fr_Al_OH(mol.rdkit_mol)
+
+            # Count aromatic hydroxyls (phenols)
+            aromatic_oh = Fragments.fr_Ar_OH(mol.rdkit_mol)
+
+            total_oh = aliphatic_oh + aromatic_oh
+
+            if total_oh != 2:
+                return True  # Infeasible: Not enough -OH groups
+
+            # oh_leaf_pattern = Chem.MolFromSmarts("[O;X1;H1]")
+            # # oh_leaf_pattern = Chem.MolFromSmarts("[OH;X1]")
+            # oh_leaf_matches = mol.rdkit_mol.GetSubstructMatches(oh_leaf_pattern)
+            #
+            # # Need at least two leaf -OH groups to even be considered
+            # if len(oh_leaf_matches) < 2:
+            #     return True  # Infeasible: Not enough -OH leaf groups
+
+            # # Find the ring atoms these leaf -OH groups are attached to
+            # oh_neighbor_atoms = []
+            # for match in oh_leaf_matches:
+            #     o_idx = match[0]
+            #     o_atom = mol.rdkit_mol.GetAtomWithIdx(o_idx)
+            #     neighbor = o_atom.GetNeighbors()[0]  # [OH;X1] guarantees one neighbor
+            #     if neighbor.IsInRing():
+            #         oh_neighbor_atoms.append(neighbor.GetIdx())
+            #
+            # # Need at least two leaf -OH groups *attached to rings*
+            # if len(oh_neighbor_atoms) < 2:
+            #     return True  # Infeasible: Not enough -OH leaves *on rings*
+
+            # # Check if at least one pair of these atoms are in different rings
+            # # Get the list of ring indices (e.g., 0, 1, 2...) each atom belongs to
+            # ring_membership = [set(ring_info.GetAtomRingIds(i)) for i in oh_neighbor_atoms]
+            #
+            # found_pair_on_different_rings = False
+            # for i in range(len(ring_membership)):
+            #     for j in range(i + 1, len(ring_membership)):
+            #         # Check if the intersection of their ring sets is empty
+            #         if not ring_membership[i].intersection(ring_membership[j]):
+            #             # This pair of -OH groups is on different rings
+            #             found_pair_on_different_rings = True
+            #             break  # Found what we need
+            #     if found_pair_on_different_rings:
+            #         break  # Found what we need
+            #
+            # if not found_pair_on_different_rings:
+            #     return True  # Infeasible: All leaf -OHs are on the same ring(s)
+            # # --- END NEW -OH LOGIC ---
+
+        # --- Original constraints for other objective types ---
+        elif self.config.objective_type in ["IBA", "DMBA_TMB"] and self.config.include_structural_constraints:
             """
             Check for a ring with more than 6 atoms or less than 5
             """
             for ring in mol.rdkit_mol.GetRingInfo().AtomRings():
-                if len(ring) < 5 or len(ring) > 6: # adjust according to max/min ring size
+                if len(ring) < 5 or len(ring) > 6:  # adjust according to max/min ring size
                     return True
             """
             Check for a O-O single bond in the molecule
             """
             for bond in mol.rdkit_mol.GetBonds():
                 if (bond.GetBondType() == Chem.BondType.SINGLE and
-                    mol.rdkit_mol.GetAtomWithIdx(bond.GetBeginAtomIdx()).GetAtomicNum() == 8 and
+                        mol.rdkit_mol.GetAtomWithIdx(bond.GetBeginAtomIdx()).GetAtomicNum() == 8 and
                         mol.rdkit_mol.GetAtomWithIdx(bond.GetEndAtomIdx()).GetAtomicNum() == 8):
                     return True
             """
@@ -306,7 +377,7 @@ class MoleculeObjectiveEvaluator:
             """
             for bond in mol.rdkit_mol.GetBonds():
                 if (bond.GetBondType() == Chem.BondType.SINGLE and
-                    mol.rdkit_mol.GetAtomWithIdx(bond.GetBeginAtomIdx()).GetAtomicNum() == 7 and
+                        mol.rdkit_mol.GetAtomWithIdx(bond.GetBeginAtomIdx()).GetAtomicNum() == 7 and
                         mol.rdkit_mol.GetAtomWithIdx(bond.GetEndAtomIdx()).GetAtomicNum() == 7):
                     return True
             """
@@ -318,12 +389,13 @@ class MoleculeObjectiveEvaluator:
                     nitrogen_count = sum(1 for nbr in neighbors if
                                          nbr.GetAtomicNum() == 7 and
                                          mol.rdkit_mol.GetBondBetweenAtoms(atom.GetIdx(),
-                                                                 nbr.GetIdx()).GetBondType() == Chem.BondType.SINGLE)
+                                                                           nbr.GetIdx()).GetBondType() == Chem.BondType.SINGLE)
 
                     # Check if carbon is also double-bonded to oxygen (C=O)
                     has_carbonyl = any(
                         nbr.GetAtomicNum() == 8 and  # Oxygen
-                        mol.rdkit_mol.GetBondBetweenAtoms(atom.GetIdx(), nbr.GetIdx()).GetBondType() == Chem.BondType.DOUBLE
+                        mol.rdkit_mol.GetBondBetweenAtoms(atom.GetIdx(),
+                                                          nbr.GetIdx()).GetBondType() == Chem.BondType.DOUBLE
                         for nbr in neighbors
                     )
 
@@ -345,4 +417,5 @@ class MoleculeObjectiveEvaluator:
                     if n_count >= 1 and o_count >= 1 and h_count == 1:
                         return True  # Restriction is violated
 
+        # If no constraints were violated for the current objective_type
         return False
