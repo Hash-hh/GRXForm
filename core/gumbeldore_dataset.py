@@ -163,10 +163,10 @@ class GumbeldoreDataset:
         generated_sa_scores = np.array([x["sa_score"] for x in generated_mols])
         metrics_return["mean_best_gen_obj"] = generated_objs.mean()
         metrics_return["mean_best_gen_sa_score"] = generated_sa_scores.mean()
-        metrics_return["best_gen_obj"] = generated_objs[0]
-        metrics_return["best_gen_sa_score"] = generated_sa_scores[0]
-        metrics_return["worst_gen_obj"] = generated_objs[-1]
-        metrics_return["worst_gen_sa_score"] = generated_sa_scores[-1]
+        metrics_return["best_gen_obj"] = generated_objs[0] if len(generated_objs) > 0 else 0
+        metrics_return["best_gen_sa_score"] = generated_sa_scores[0] if len(generated_sa_scores) > 0 else 0
+        metrics_return["worst_gen_obj"] = generated_objs[-1] if len(generated_objs) > 0 else 0
+        metrics_return["worst_gen_sa_score"] = generated_sa_scores[-1] if len(generated_sa_scores) > 0 else 0
 
         # Now check if there already is a data file, and if so, load it and merge it.
         destination_path = self.gumbeldore_config["destination_path"]

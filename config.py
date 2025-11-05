@@ -55,11 +55,11 @@ class MoleculeConfig:
             "I": {"allowed": True, "atomic_number": 53, "valence": 1}
         }
 
-        self.start_from_c_chains = False
+        self.start_from_c_chains = True
         self.start_c_chain_max_len = 1
         # self.start_from_smiles = 'C1=NC2=C(N1COCCO)N=C(NC2=O)N'  # ACYCLOVIR SMILES
-        self.start_from_smiles = 'c1cc(ccc1Cc2ccc(cc2)O)O'  # BPA LCD
-        # self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
+        # self.start_from_smiles = 'c1cc(ccc1Cc2ccc(cc2)O)O'  # BPA LCD
+        self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
         # Positive value x, where the actual objective with our molecule score will be set to obj = score - x * SA_score
         self.synthetic_accessibility_in_objective_scale = 0
@@ -122,7 +122,7 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
             "search_type": "tasar",  # 'wor'
-            "beam_width": 64,
+            "beam_width": 128,
             "replan_steps": 12,
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.

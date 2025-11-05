@@ -313,6 +313,7 @@ class MoleculeObjectiveEvaluator:
 
             total_oh = aliphatic_oh + aromatic_oh
 
+            # if total_oh < 2:
             if total_oh != 2:
                 return True  # Infeasible: Not enough -OH groups
 

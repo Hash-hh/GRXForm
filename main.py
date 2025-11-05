@@ -123,9 +123,17 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     metrics["loss_level_one"] = accumulated_loss_lvl_one / num_batches
     metrics["loss_level_two"] = accumulated_loss_lvl_two / num_batches
 
+    # --- MODIFICATION: Convert top_20_molecules to newline-separated SMILES string ---
     top_20_molecules = metrics["top_20_molecules"]
+    smiles_to_save = ""
+    if top_20_molecules and isinstance(top_20_molecules, list) and top_20_molecules[0]:
+        # Get the dictionary of smiles:objective
+        smiles_dict = top_20_molecules[0]
+        # Get just the keys (SMILES) and join with newline
+        smiles_to_save = "\n".join(smiles_dict.keys())
+    # --- END MODIFICATION ---
     del metrics["top_20_molecules"]
-    return metrics, top_20_molecules
+    return metrics, smiles_to_save
 
 
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer, objective_evaluator: MoleculeObjectiveEvaluator):
@@ -136,7 +144,15 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
         config=config, objective_evaluator=objective_evaluator
     )
     metrics = gumbeldore_dataset.generate_dataset(copy.deepcopy(network.get_weights()), memory_aggressive=False)
+    # --- MODIFICATION: Convert top_20_molecules to newline-separated SMILES string ---
     top_20_mols = metrics["top_20_molecules"]
+    smiles_to_save = ""
+    if top_20_mols and isinstance(top_20_mols, list) and top_20_mols[0]:
+        # Get the dictionary of smiles:objective
+        smiles_dict = top_20_mols[0]
+        # Get just the keys (SMILES) and join with newline
+        smiles_to_save = "\n".join(smiles_dict.keys())
+    # --- END MODIFICATION ---
     metrics = {
         f"{eval_type}_mean_top_20_obj": metrics["mean_top_20_obj"],
         f"{eval_type}_mean_top_20_sa_score": metrics["mean_top_20_sa_score"],
@@ -147,7 +163,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print(f"Eval ({eval_type}) best obj: {metrics[f'{eval_type}_best_obj']:.3f}")
     print(f"Eval ({eval_type}) mean top 20 obj: {metrics[f'{eval_type}_mean_top_20_obj']:.3f}")
 
-    return metrics, top_20_mols
+    return metrics, smiles_to_save
 
 
 if __name__ == '__main__':
