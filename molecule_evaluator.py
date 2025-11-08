@@ -288,6 +288,8 @@ class MoleculeObjectiveEvaluator:
 
         # --- BPA-SPECIFIC STRUCTURAL CONSTRAINTS ---
         if self.config.objective_type == "bpa" and self.config.include_structural_constraints:
+            # sanitize:
+            # Chem.SanitizeMol(mol.rdkit_mol)
 
             ring_info = mol.rdkit_mol.GetRingInfo()
             atom_rings = ring_info.AtomRings()
@@ -307,55 +309,61 @@ class MoleculeObjectiveEvaluator:
 
             # Count aliphatic hydroxyls (alcohols)
             aliphatic_oh = Fragments.fr_Al_OH(mol.rdkit_mol)
-
+            #
             # Count aromatic hydroxyls (phenols)
             aromatic_oh = Fragments.fr_Ar_OH(mol.rdkit_mol)
-
-            total_oh = aliphatic_oh + aromatic_oh
-
-            # if total_oh < 2:
-            if total_oh != 2:
-                return True  # Infeasible: Not enough -OH groups
-
-            # oh_leaf_pattern = Chem.MolFromSmarts("[O;X1;H1]")
-            # # oh_leaf_pattern = Chem.MolFromSmarts("[OH;X1]")
-            # oh_leaf_matches = mol.rdkit_mol.GetSubstructMatches(oh_leaf_pattern)
             #
-            # # Need at least two leaf -OH groups to even be considered
-            # if len(oh_leaf_matches) < 2:
-            #     return True  # Infeasible: Not enough -OH leaf groups
+            # total_oh = aliphatic_oh + aromatic_oh
+            #
+            # # if total_oh < 2:
+            # if total_oh != 2:
+            #     return True  # Infeasible: Not enough -OH groups
 
-            # # Find the ring atoms these leaf -OH groups are attached to
-            # oh_neighbor_atoms = []
-            # for match in oh_leaf_matches:
-            #     o_idx = match[0]
-            #     o_atom = mol.rdkit_mol.GetAtomWithIdx(o_idx)
-            #     neighbor = o_atom.GetNeighbors()[0]  # [OH;X1] guarantees one neighbor
-            #     if neighbor.IsInRing():
-            #         oh_neighbor_atoms.append(neighbor.GetIdx())
-            #
-            # # Need at least two leaf -OH groups *attached to rings*
-            # if len(oh_neighbor_atoms) < 2:
-            #     return True  # Infeasible: Not enough -OH leaves *on rings*
+            # We want *exactly* 2 phenols and 0 alcohols
+            if aromatic_oh != 2 or aliphatic_oh > 0:
+                return True  # Infeasible: Not exactly 2 phenol groups
 
-            # # Check if at least one pair of these atoms are in different rings
-            # # Get the list of ring indices (e.g., 0, 1, 2...) each atom belongs to
-            # ring_membership = [set(ring_info.GetAtomRingIds(i)) for i in oh_neighbor_atoms]
+            # Find all phenol groups
+            phenol_pattern = Chem.MolFromSmarts('[OH]c')
+            phenol_matches = mol.rdkit_mol.GetSubstructMatches(phenol_pattern)
+
+            # Find all alcohol groups
+            alcohol_pattern = Chem.MolFromSmarts('[OH]C')
+            alcohol_matches = mol.rdkit_mol.GetSubstructMatches(alcohol_pattern)
+
+            # if len(alcohol_matches) != aliphatic_oh:
+            #     print(len(alcohol_matches))
+            #     print(aliphatic_oh)
+            #     raise ValueError("Mismatch in counted aliphatic -OH groups and found matches.")
+            # if len(phenol_matches) != aromatic_oh:
+            #     print(len(phenol_matches))
+            #     print(aromatic_oh)
+            #     raise ValueError("Mismatch in counted phenol -OH groups and found matches.")
+
+            # We can now be sure we have exactly two phenol -OH groups.
+            # Let's get the atom indices of the two oxygen atoms.
+            # A match is a tuple like (O_idx, C_idx). We want the O_idx (first item).
+            oh_oxygen_atoms = [phenol_matches[0][0], phenol_matches[1][0]]
+
+            # 4. Calculate the topological distance (shortest bond path)
+            #    between the two oxygen atoms.
+            try:
+                path = Chem.GetShortestPath(mol.rdkit_mol, oh_oxygen_atoms[0], oh_oxygen_atoms[1])
+                distance = len(path) - 1  # Number of bonds = number of atoms in path - 1
+            except RuntimeError:
+                # This can happen if the two -OH groups are in disconnected fragments
+                return True  # Infeasible: fragments
+
+            # 5. Set a distance threshold.
+            #    - Hydroquinone (OH-C-C-C-OH on same ring): distance = 4
+            #    - 4,4'-Biphenol (OH-...-Ring-Ring-...-OH): distance = 7
+            #    - BPA (OH-...-Ring-C-Ring-...-OH): distance = 8
             #
-            # found_pair_on_different_rings = False
-            # for i in range(len(ring_membership)):
-            #     for j in range(i + 1, len(ring_membership)):
-            #         # Check if the intersection of their ring sets is empty
-            #         if not ring_membership[i].intersection(ring_membership[j]):
-            #             # This pair of -OH groups is on different rings
-            #             found_pair_on_different_rings = True
-            #             break  # Found what we need
-            #     if found_pair_on_different_rings:
-            #         break  # Found what we need
-            #
-            # if not found_pair_on_different_rings:
-            #     return True  # Infeasible: All leaf -OHs are on the same ring(s)
-            # # --- END NEW -OH LOGIC ---
+            # A threshold of 6 or 7 seems appropriate to exclude single-ring systems.
+
+            MIN_OH_DISTANCE = 9
+            if distance < MIN_OH_DISTANCE:
+                return True  # Infeasible: -OH groups are too close (on same ring)
 
         # --- Original constraints for other objective types ---
         elif self.config.objective_type in ["IBA", "DMBA_TMB"] and self.config.include_structural_constraints:
@@ -420,3 +428,85 @@ class MoleculeObjectiveEvaluator:
 
         # If no constraints were violated for the current objective_type
         return False
+
+
+
+
+if __name__ == "__main__":
+    def check_molecule_feasibility(mol):
+        # Your existing code
+        ring_info = mol.GetRingInfo()
+        atom_rings = ring_info.AtomRings()
+        num_rings = len(atom_rings)
+
+        # 1. Must have at least two rings (or adjust as needed)
+        # Note: This might be too strict. A molecule like HO-CH2-CH2-Linker-CH2-CH2-OH
+        # might be valid but have 0 rings. Consider if you *only* want ring-based
+        # monomers like BPA.
+        if num_rings < 2:
+            return True  # Infeasible: Not enough rings
+
+        # 2. Rings must not be larger than 6 atoms (or smaller than 5)
+        for ring in atom_rings:
+            if len(ring) > 6 or len(ring) < 5:
+                return True  # Infeasible: Ring size incorrect
+
+        # --- REVISED -OH LOGIC (Robust) ---
+        # 3. Must have exactly 2 -OH groups.
+        #    For BPA-like polymerization, you probably want *phenols* ([OH]c)
+        #    and *no* alcohols ([OH]C).
+
+        # Find all phenol groups
+        phenol_pattern = Chem.MolFromSmarts('[OH]c')
+        phenol_matches = mol.GetSubstructMatches(phenol_pattern)
+
+        # Find all alcohol groups
+        alcohol_pattern = Chem.MolFromSmarts('[OH]C')
+        alcohol_matches = mol.GetSubstructMatches(alcohol_pattern)
+
+        # We want *exactly* 2 phenols and 0 alcohols
+        if len(phenol_matches) != 2 or len(alcohol_matches) > 0:
+            return True  # Infeasible: Not exactly 2 phenol groups
+
+        # We can now be sure we have exactly two phenol -OH groups.
+        # Let's get the atom indices of the two oxygen atoms.
+        # A match is a tuple like (O_idx, C_idx). We want the O_idx (first item).
+        oh_oxygen_atoms = [phenol_matches[0][0], phenol_matches[1][0]]
+
+        # 4. Calculate the topological distance (shortest bond path)
+        #    between the two oxygen atoms.
+        try:
+            path = Chem.GetShortestPath(mol, oh_oxygen_atoms[0], oh_oxygen_atoms[1])
+            distance = len(path) - 1  # Number of bonds = number of atoms in path - 1
+        except RuntimeError:
+            # This can happen if the two -OH groups are in disconnected fragments
+            return True  # Infeasible: fragments
+
+        # 5. Set a distance threshold.
+        #    - Hydroquinone (OH-C-C-C-OH on same ring): distance = 4
+        #    - 4,4'-Biphenol (OH-...-Ring-Ring-...-OH): distance = 7
+        #    - BPA (OH-...-Ring-C-Ring-...-OH): distance = 8
+        #
+        # A threshold of 6 or 7 seems appropriate to exclude single-ring systems.
+
+        MIN_OH_DISTANCE = 6
+        if distance < MIN_OH_DISTANCE:
+            return True  # Infeasible: -OH groups are too close (on same ring)
+
+        # If all checks pass, the molecule is feasible
+        return False
+    # --- Example Usage ---
+    # Make an RDKit mol object (assuming 'mol.rdkit_mol' from your code)
+    bpa_smiles = 'CC(C)(c1ccc(O)cc1)c2ccc(O)cc2'
+    bpa_mol = Chem.MolFromSmiles(bpa_smiles)
+
+    hydroquinone_smiles = 'c1cc(O)ccc1O'
+    hydroquinone_mol = Chem.MolFromSmiles(hydroquinone_smiles)
+
+    biphenol_smiles = 'c1cc(O)ccc1-c2ccc(O)cc2'
+    biphenol_mol = Chem.MolFromSmiles(biphenol_smiles)
+
+    # Test the function
+    print(f"Is BPA feasible? {not check_molecule_feasibility(bpa_mol)}")
+    print(f"Is Hydroquinone feasible? {not check_molecule_feasibility(hydroquinone_mol)}")
+    print(f"Is 4,4'-Biphenol feasible? {not check_molecule_feasibility(biphenol_mol)}")

@@ -25,28 +25,28 @@ class MoleculeConfig:
 
         self.atom_vocabulary = {  # Attention! Order matters!
             "C":    {"allowed": True, "atomic_number": 6, "valence": 4},
-            "C-":   {"allowed": True, "atomic_number": 6, "valence": 3, "formal_charge": -1},
-            "C+":   {"allowed": True, "atomic_number": 6, "valence": 5, "formal_charge": 1},
+            "C-":   {"allowed": False, "atomic_number": 6, "valence": 3, "formal_charge": -1},
+            "C+":   {"allowed": False, "atomic_number": 6, "valence": 5, "formal_charge": 1},
             "C@":   {"allowed": True, "atomic_number": 6, "valence": 4, "chiral_tag": 1},
             "C@@":  {"allowed": True, "atomic_number": 6, "valence": 4, "chiral_tag": 2},
 
             "N":    {"allowed": True, "atomic_number": 7, "valence": 3},
-            "N-":   {"allowed": True, "atomic_number": 7, "valence": 2, "formal_charge": -1},
-            "N+":   {"allowed": True, "atomic_number": 7, "valence": 4, "formal_charge": 1},
+            "N-":   {"allowed": False, "atomic_number": 7, "valence": 2, "formal_charge": -1},
+            "N+":   {"allowed": False, "atomic_number": 7, "valence": 4, "formal_charge": 1},
 
             "O":    {"allowed": True, "atomic_number": 8, "valence": 2},
-            "O-":   {"allowed": True, "atomic_number": 8, "valence": 1, "formal_charge": -1},
-            "O+":   {"allowed": True, "atomic_number": 8, "valence": 3, "formal_charge": 1},
+            "O-":   {"allowed": False, "atomic_number": 8, "valence": 1, "formal_charge": -1},
+            "O+":   {"allowed": False, "atomic_number": 8, "valence": 3, "formal_charge": 1},
 
             "F":    {"allowed": True, "atomic_number": 9, "valence": 1},
 
             "P":    {"allowed": True, "atomic_number": 15, "valence": 7},
-            "P-":   {"allowed": True, "atomic_number": 15, "valence": 6, "formal_charge": -1},
-            "P+":   {"allowed": True, "atomic_number": 15, "valence": 8, "formal_charge": 1},
+            "P-":   {"allowed": False, "atomic_number": 15, "valence": 6, "formal_charge": -1},
+            "P+":   {"allowed": False, "atomic_number": 15, "valence": 8, "formal_charge": 1},
 
             "S":    {"allowed": True, "atomic_number": 16, "valence": 6},
-            "S-":   {"allowed": True, "atomic_number": 16, "valence": 5, "formal_charge": -1},
-            "S+":   {"allowed": True, "atomic_number": 16, "valence": 7, "formal_charge": 1},
+            "S-":   {"allowed": False, "atomic_number": 16, "valence": 5, "formal_charge": -1},
+            "S+":   {"allowed": False, "atomic_number": 16, "valence": 7, "formal_charge": 1},
             "S@":   {"allowed": True, "atomic_number": 16, "valence": 6, "chiral_tag": 1},
             "S@@":  {"allowed": True, "atomic_number": 16, "valence": 6, "chiral_tag": 2},
 
@@ -85,6 +85,8 @@ class MoleculeConfig:
             "w_qed": 1.0,
         }
 
+        self.polync_device = "cuda:0"
+
         # Loading trained checkpoints to resume training or evaluate
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_checkpoint_from_path = 'model/weights.pt'  # If given, model checkpoint is loaded from this path.
@@ -122,7 +124,7 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
             "search_type": "tasar",  # 'wor'
-            "beam_width": 128,
+            "beam_width": 512,
             "replan_steps": 12,
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
