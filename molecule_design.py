@@ -381,7 +381,8 @@ class MoleculeDesign(BaseTrajectory):
             batch = MoleculeDesign.list_to_batch(molecules=trajectories, device=network.device)
             batch_logits_per_level = list(network(batch))
             for lvl in range(3):
-                batch_logits_per_level[lvl] = batch_logits_per_level[lvl].cpu().numpy()
+                batch_logits_per_level[lvl] = batch_logits_per_level[lvl].float().cpu().numpy()
+                # batch_logits_per_level[lvl] = batch_logits_per_level[lvl].cpu().numpy()
 
             for i, mol in enumerate(trajectories):
                 # get logits for this molecule and corresponding level

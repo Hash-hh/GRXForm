@@ -130,11 +130,12 @@ def _prepare_masked_log_probs(level_logits: torch.Tensor,
     if not feasible_any:
         level_logits = torch.zeros_like(level_logits)
     level_logits = level_logits.masked_fill(infeasible_mask, float("-inf"))
-    return torch.log_softmax(level_logits, dim=-1)
+    return torch.log_softmax(level_logits.float(), dim=-1)
+    # return torch.log_softmax(level_logits, dim=-1)
 
 
 def _make_autocast_ctx(config):
-    if not getattr(config, "use_amp", False):
+    if not config.use_amp:
         return nullcontext(), None
     amp_dtype = getattr(config, "amp_dtype", "bf16").lower()
     if amp_dtype == "fp16":
@@ -160,7 +161,6 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
       - call backward exactly once on that scalar
     This avoids reusing a freed graph while keeping activation memory low.
     """
-    # num_ppo_epochs = config.ppo_epochs
     epsilon = config.rl_ppo_clip_epsilon
     clip_val = config.optimizer.get("gradient_clipping")
     # Get the entropy coefficient from the config
@@ -219,7 +219,6 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 rec = batch_records[local_idx]
                 clone = clones[local_idx]
                 cursor = cursors[local_idx]
-                # print(rec)
 
                 lvl = clone.current_action_level
                 if lvl == 0:
@@ -239,17 +238,8 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 # DR. GRPO CLIPPED OBJECTIVE
                 chosen_logp = log_probs[action]
-                # Calculate the probability ratio
-                # print(chosen_logp)
-                # print(old_logp)
-
                 # Get advantage
                 advantage = rec.advantage
-
-                # if current_epoch == 0 and num_ppo_epochs == 1:
-                #     # simple REINFORCE update: loss = -advantage * log_prob
-                #     ppo_loss_step = -(advantage / N) * chosen_logp
-                # else:
 
                 # Retrieve the old log probability from when the action was originally sampled
                 old_logp_float = rec.log_probs_history[cursor]
@@ -274,41 +264,18 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                 finite_probs = torch.exp(finite_log_probs)
 
                 entropy = -torch.sum(finite_probs * finite_log_probs)
-                # entropy = 0
 
                 step_count += 1
-
-
 
                 # Metrics accumulation
                 rec.log_prob_sum = rec.log_prob_sum + chosen_logp.detach().float()
                 rec.length += 1
                 sum_adv_logp += rec.advantage * float(chosen_logp.detach().cpu())
 
-                # Form loss contribution (tensor)
-                # print(rec.history)
-                # print("OOGA BOOGA")
-                # traj_len = len(rec.history)
-                # # Add a safeguard against division by zero for empty or single-step histories
-                # if traj_len == 0:
-                #     traj_len = 1
-
-                # advantage term: -(1/N) * Σ_i A_i Σ_t logp
-                # normalized by trajectory length
-                # advantage_term = -(rec.advantage / traj_len / N) * chosen_logp
-
-                # advantage_term = -(rec.advantage / N) * chosen_logp
-
                 entropy_term = (entropy_beta / N) * entropy  # Scaled by 1/N like the main loss
                 contrib -= entropy_term
 
                 total_entropy += entropy.detach().cpu().item()
-                # total_entropy += entropy
-
-                # print("advantage: ", advantage_term.item())
-                # print("entropy: ", entropy_term.item())
-
-                # contrib = advantage_term
 
                 if scaler is not None:
                     # Accumulate as Python float; we will wrap in a tensor at backward time
@@ -343,8 +310,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
         optimizer.step()
 
     mean_entropy = total_entropy / step_count if step_count > 0 else 0.0
-    # Compute logged policy loss
-    # policy_loss_value = -(1.0 / N) * sum_adv_logp
+
     return total_ppo_loss, mean_entropy
 
 
@@ -392,10 +358,6 @@ def dr_grpo_update(model: MoleculeTransformer,
     baseline = compute_baseline_and_advantages(records, normalize=normalize_adv)
 
     ppo_epochs = config.ppo_epochs
-    # autocast_ctx, scaler = _make_autocast_ctx(config)
-    # policy_loss_val, mean_entropy = streaming_replay_and_backward(
-    #     model, optimizer, records, config, device, autocast_ctx, scaler
-    # )
     total_policy_loss = 0
     total_mean_entropy = 0
 
@@ -442,4 +404,3 @@ def dr_grpo_update(model: MoleculeTransformer,
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
     return metrics
-    # return metrics, records

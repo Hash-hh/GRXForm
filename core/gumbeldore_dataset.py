@@ -26,6 +26,9 @@ import random
 from config import MoleculeConfig
 from molecule_evaluator import MoleculeObjectiveEvaluator
 
+from contextlib import nullcontext
+from rl_updates import _make_autocast_ctx
+
 
 def batched_iid_monte_carlo_sampling(
         root_nodes: List[MoleculeDesign],
@@ -40,13 +43,17 @@ def batched_iid_monte_carlo_sampling(
     results_by_root = []
     temperature = config.gumbeldore_config.get("sampling_temperature", 1.0)
 
+    autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
+
     for root_node in root_nodes:
         active_trajectories = [root_node._shallow_clone() for _ in range(num_samples_per_instance)]
         finished_trajectories = []
 
         while active_trajectories:
-            # Get log probabilities for all active trajectories in a single batch
-            log_probs_list = log_prob_fn(active_trajectories)
+
+            with autocast_ctx:
+                # Get log probabilities for all active trajectories in a single batch
+                log_probs_list = log_prob_fn(active_trajectories)
 
             next_active_trajectories = []
 
@@ -292,8 +299,11 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     network.to(network.device)
     network.eval()
 
+    autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
+
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
-        return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
+        with autocast_ctx:
+            return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
 
     def batch_leaf_evaluation_fn(trajectories: List[MoleculeDesign]) -> np.array:
         objs = objective_evaluator.predict_objective(trajectories)
@@ -305,8 +315,9 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         # Collect all trajectories that need a forward pass into a single list.
         trajectories = [traj for traj, _ in trajectory_action_pairs]
 
-        # Perform a SINGLE batched forward pass to get all log probabilities at once.
-        log_probs_list = MoleculeDesign.log_probability_fn(trajectories, network)
+        with autocast_ctx:
+            # Perform a SINGLE batched forward pass to get all log probabilities at once.
+            log_probs_list = MoleculeDesign.log_probability_fn(trajectories, network)
 
         # Now, iterate through the original pairs and apply the actions using the pre-computed log probs.
         results = []
