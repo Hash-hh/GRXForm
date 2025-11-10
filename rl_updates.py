@@ -378,6 +378,7 @@ def dr_grpo_update(model: MoleculeTransformer,
         normalize_adv = config.rl_advantage_normalize
         baseline = compute_baseline_and_advantages(records_group, normalize=normalize_adv)
         all_baselines.append(baseline)
+        # print(all_baselines)
 
         # Add the processed records to the flat list
         all_records_flat.extend(records_group)

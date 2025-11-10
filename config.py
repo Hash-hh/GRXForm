@@ -152,7 +152,7 @@ class MoleculeConfig:
         self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_wor_64_samples"
+        self.wandb_run_name = f"{self.objective_type}_10_groups_wor_32_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 

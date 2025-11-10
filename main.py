@@ -511,9 +511,10 @@ if __name__ == '__main__':
                 if rl_mode_active:
                     # Define the specific list of metrics you want to log from the RL update
                     keys_to_log = [
+                        'baseline',
                         'mean_reward',
                         'best_reward',
-                        'best_objective',
+                        # 'best_objective',
                         'mean_advantage',
                         'std_advantage',
                         'policy_loss',
