@@ -160,7 +160,7 @@ def train_for_one_epoch_rl(epoch: int,
         memory_aggressive=False
     )
 
-    if len(trajectories) == 0:
+    if not trajectories or not any(trajectories):
         print("[RL] WARNING: No trajectories generated this epoch. Skipping update.")
         return {
             "num_trajectories": 0,
@@ -188,7 +188,7 @@ def train_for_one_epoch_rl(epoch: int,
     metrics = dr_grpo_update(
         model=network,
         optimizer=optimizer,
-        designs=trajectories,
+        designs_groups=trajectories,
         config=config,
         device=torch.device(config.training_device),
         logger=None,
@@ -203,14 +203,17 @@ def train_for_one_epoch_rl(epoch: int,
 
     # Build top 20 text artifact
     mol_map = {}
-    for m in trajectories:
-        if m.objective is None:
-            continue
-        if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
-            mol_map[m.smiles_string] = {
-                "smiles": m.smiles_string,
-                "obj": m.objective
-            }
+    for group in trajectories:  # <-- NEW: Add nested loop
+        for m in group:
+            if m.objective is None:
+                continue
+            if not m.smiles_string:  # Good to add this check
+                continue
+            if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
+                mol_map[m.smiles_string] = {
+                    "smiles": m.smiles_string,
+                    "obj": m.objective
+                }
     unique_mols = list(mol_map.values())
     unique_mols.sort(key=lambda x: x["obj"], reverse=True)
     top20 = unique_mols[:20]

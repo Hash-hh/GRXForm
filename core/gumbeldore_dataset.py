@@ -125,6 +125,14 @@ class GumbeldoreDataset:
         self.objective_evaluator = objective_evaluator
         self.devices_for_workers: List[str] = self.gumbeldore_config["devices_for_workers"]
 
+        self.fragment_library = []
+        if config.use_fragment_library:
+            with open(config.fragment_library_path, 'r') as f:
+                self.fragment_library = [line.strip() for line in f if line.strip()]
+            if not self.fragment_library:
+                raise FileNotFoundError("Fragment file is empty.")
+            print(f"[GRPO] Loaded {len(self.fragment_library)} fragments from {config.fragment_library_path}.")
+
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False):
         """
@@ -141,7 +149,34 @@ class GumbeldoreDataset:
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                           self.gumbeldore_config["batch_size_per_cpu_worker"])
 
-        if self.config.start_from_c_chains:
+        if self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
+            # We want one prompt to always be "C", so we sample N-1 from the library
+            num_prompts_from_lib = self.config.num_prompts_per_epoch - 1
+            if num_prompts_from_lib > 0:
+                sampled_smiles_list = random.sample(self.fragment_library, num_prompts_from_lib)
+            else:
+                sampled_smiles_list = []  # In case num_prompts_per_epoch is 1
+
+            # Manually add the single Carbon atom as a prompt
+            sampled_smiles_list.append("C")
+            print(f"[GRPO] Sampling {num_prompts_from_lib} fragments + 1 'C' atom prompt.")
+
+            # Create MoleculeDesign objects from these SMILES
+            problem_instances = []
+            for smi in sampled_smiles_list:
+                try:
+                    # Our from_smiles function will correctly handle "C"
+                    # and turn it into a clean prompt, just like get_c_chains did.
+                    problem_instances.append(
+                        MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                    )
+                except Exception as e:
+                    print(f"[GRPO] Warning: Failed to load fragment '{smi}'. Skipping. Error: {e}")
+
+            if not problem_instances:
+                raise ValueError("[GRPO] Error: No valid fragments could be loaded from the fragment library.")
+
+        elif self.config.start_from_c_chains:
             problem_instances = MoleculeDesign.get_c_chains(self.config)
         elif self.config.start_from_smiles is not None:
             problem_instances = [MoleculeDesign.from_smiles(self.config, self.config.start_from_smiles)]
@@ -189,13 +224,26 @@ class GumbeldoreDataset:
         torch.cuda.empty_cache()
 
         # RL mode: return raw MoleculeDesign list (no metrics dict)
-        if getattr(self.config, "use_dr_grpo", True):
-            flat: List[MoleculeDesign] = []
-            for lst in results:
-                if not lst:
+        if self.config.use_dr_grpo:
+            grouped_designs: List[List[MoleculeDesign]] = []
+            for group_result in results:  # `group_result` is one List[BeamLeaf] or List[MoleculeDesign]
+                if not group_result:
                     continue
-                flat.extend(lst)
-            return flat
+
+                # Check if it's BeamLeaf objects (from 'wor') or MoleculeDesign (from 'iid_mc')
+                if isinstance(group_result[0], sbs.BeamLeaf):
+                    grouped_designs.append([leaf.state for leaf in group_result])
+                else:
+                    grouped_designs.append(group_result)  # It's already List[MoleculeDesign]
+
+            return grouped_designs  # Return the List[List[MoleculeDesign]]
+
+            # flat: List[MoleculeDesign] = []
+            # for lst in results:
+            #     if not lst:
+            #         continue
+            #     flat.extend(lst)
+            # return flat
 
         # Supervised / non-RL: original metrics path
         # print(self.process_results(problem_instances, results))
@@ -302,6 +350,12 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
 
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
+        if not all(trajectories):
+            print(f"[DEBUG] child_log_probability_fn received a list containing None.", flush=True)
+            # Print the list for inspection
+            print(f"[DEBUG] Trajectories list: {trajectories}", flush=True)
+        # --- END DEBUG PRINT ---
+
         with autocast_ctx:
             return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
 

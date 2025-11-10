@@ -108,6 +108,8 @@ class MoleculeDesign(BaseTrajectory):
         # Set this to True if anything goes wrong and the molecule will always evaluate to objective -inf
         self.infeasibility_flag: bool = False
 
+        self.prompt_smiles: Optional[str] = None
+
         self.update_action_mask()
         self.update_rdkit_mol(new_atom=initial_atom)
 
@@ -223,6 +225,15 @@ class MoleculeDesign(BaseTrajectory):
         Note that the updates are performed in-place!
         """
         assert not self.synthesis_done, "Taking action on already terminated design. No no!"
+
+        # --- START DEBUG PRINT ---
+        # We check the condition *before* asserting to print more info
+        if self.current_action_mask[action] != 0:
+            print(f"[DEBUG] take_action: About to fail assertion!", flush=True)
+            print(f"[DEBUG]   Action: {action}, Level: {self.current_action_level}", flush=True)
+            print(f"[DEBUG]   Mask (len {len(self.current_action_mask)}): {self.current_action_mask}", flush=True)
+            print(f"[DEBUG]   Mask at action [{action}]: {self.current_action_mask[action]}", flush=True)
+        # --- END DEBUG PRINT ---
 
         assert self.current_action_mask[action] == 0, \
             f"Trying to take action {action} on level {self.current_action_level}, but it is set to infeasible"
@@ -440,6 +451,8 @@ class MoleculeDesign(BaseTrajectory):
         new.objective = self.objective
         new.sa_score = self.sa_score
         new.infeasibility_flag = self.infeasibility_flag
+
+        new.prompt_smiles = self.prompt_smiles
 
         # Constants
         new.virtual_distance = self.virtual_distance
@@ -685,7 +698,25 @@ class MoleculeDesign(BaseTrajectory):
     def from_smiles(config: MoleculeConfig, smiles: str, do_finish=False, compare_smiles=False) -> 'MoleculeDesign':
         mol = Chem.MolFromSmiles(smiles)
         Chem.SanitizeMol(mol)
-        return MoleculeDesign.from_rdkit_mol(config, mol, smiles, do_finish, compare_smiles)
+
+        # We MUST use a canonical SMILES to ensure the atom order
+        # is identical between generation and replay.
+        canonical_smiles = Chem.MolToSmiles(mol)
+
+        # If the input smiles was not canonical, we must re-create the
+        # mol object from the canonical smiles to get the canonical atom order.
+        if smiles != canonical_smiles:
+            mol = Chem.MolFromSmiles(canonical_smiles)
+            Chem.SanitizeMol(mol)
+
+        # Pass the canonical mol and smiles to the builder
+        design = MoleculeDesign.from_rdkit_mol(config, mol, canonical_smiles, do_finish, compare_smiles)
+
+        if not do_finish:
+            # Store the same canonical SMILES we used to build the design
+            design.prompt_smiles = canonical_smiles
+
+        return design
 
     @staticmethod
     def from_rdkit_mol(config: MoleculeConfig, rdkit_mol: Chem.RWMol, smiles: str, do_finish=True, compare_smiles=True) -> 'MoleculeDesign':
@@ -743,5 +774,12 @@ class MoleculeDesign(BaseTrajectory):
             if compare_smiles:
                 assert Chem.CanonSmiles(design.smiles_string) == Chem.CanonSmiles(smiles), f"Converted: {Chem.CanonSmiles(design.smiles_string)}, RDKit: {Chem.CanonSmiles(smiles)}"
             design.assert_feasible()
+
+        # If this molecule is a fragment prompt (do_finish=False),
+        # its creation steps are not part of the RL history.
+        # We reset the history, making this a true root node.
+        else:
+            design.history = []
+            design.log_probs_history = []
 
         return design

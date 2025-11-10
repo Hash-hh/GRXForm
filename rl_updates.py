@@ -98,17 +98,20 @@ def compute_baseline_and_advantages(records: List[TrajectoryRecord],
 
 
 def _fresh_initial_clone(final_design: MoleculeDesign) -> MoleculeDesign:
+    """
+        Creates the correct starting environment for replay.
+        - If it was from a fragment, re-create the fragment.
+        - If it was from a single atom, re-create the single atom.
+    """
+    if final_design.prompt_smiles:
+        # Re-create the fragment prompt state
+        return MoleculeDesign.from_smiles(
+            config=final_design.config,
+            smiles=final_design.prompt_smiles,
+            do_finish=False
+        )
+
     first_atom_token = int(final_design.atoms[1])
-
-    # print(f"[DR-GRPO] Fresh initial clone: {first_atom_token}")
-    # # print type of first_atom_token
-    # print(f"[DR-GRPO] first_atom_token type: {type(first_atom_token)}")
-    # print(final_design.atoms)
-    # if hasattr(first_atom_token, "item"):
-    #     print("first_atom_token is a tensor, converting to int")
-    #     first_atom_token = int(first_atom_token.item())
-    #     print(first_atom_token)
-
     return MoleculeDesign(config=final_design.config, initial_atom=first_atom_token)
 
 
@@ -132,7 +135,6 @@ def _prepare_masked_log_probs(level_logits: torch.Tensor,
     level_logits = level_logits.masked_fill(infeasible_mask, float("-inf"))
     return torch.log_softmax(level_logits.float(), dim=-1)
     # return torch.log_softmax(level_logits, dim=-1)
-
 
 def _make_autocast_ctx(config):
     if not config.use_amp:
@@ -325,13 +327,62 @@ def compute_policy_loss_for_logging(records: List[TrajectoryRecord]) -> float:
 
 def dr_grpo_update(model: MoleculeTransformer,
                    optimizer: torch.optim.Optimizer,
-                   designs: List[MoleculeDesign],
+                   designs_groups: List[MoleculeDesign],
                    config,
                    device: torch.device,
                    logger=None,
                    novelty_memory: Optional[dict] = None):
-    records, none_dropped, nonfinite_dropped = filter_and_build_records(designs)
-    if not records:
+    # records, none_dropped, nonfinite_dropped = filter_and_build_records(designs)
+    # if not records:
+    #     metrics = {
+    #         "skipped": True,
+    #         "num_trajectories": 0,
+    #         "mean_reward": float("-inf"),
+    #         "best_reward": float("-inf"),
+    #         "policy_loss": 0.0,
+    #         "invalid_dropped": nonfinite_dropped,
+    #         "none_dropped": none_dropped
+    #     }
+    #     if logger:
+    #         logger.info(f"[DR-GRPO] {metrics}")
+    #     return metrics
+
+    all_records_flat: List[TrajectoryRecord] = []
+    total_none_dropped = 0
+    total_nonfinite_dropped = 0
+    avg_novelty_bonus = 0.0
+    total_bonus_count = 0
+    all_baselines = []  # For logging
+
+    print(f"[GRPO] Received {len(designs_groups)} groups for update.")
+
+    for i, group in enumerate(designs_groups):
+        # Filter this group
+        records_group, none_dropped, nonfinite_dropped = filter_and_build_records(group)
+        total_none_dropped += none_dropped
+        total_nonfinite_dropped += nonfinite_dropped
+
+        if not records_group:
+            print(f"[GRPO] Group {i} was empty after filtering.")
+            continue
+
+        # Apply novelty bonus (optional, now applied per-group)
+        if novelty_memory is not None and config.rl_use_novelty_bonus:
+            novelty_beta = config.rl_novelty_beta
+            if novelty_beta > 0:
+                avg_novelty_bonus += apply_novelty_bonus(records_group, novelty_memory, novelty_beta) * len(
+                    records_group)
+                total_bonus_count += len(records_group)
+
+        # Compute baseline and advantages for this group
+        normalize_adv = config.rl_advantage_normalize
+        baseline = compute_baseline_and_advantages(records_group, normalize=normalize_adv)
+        all_baselines.append(baseline)
+
+        # Add the processed records to the flat list
+        all_records_flat.extend(records_group)
+
+    if not all_records_flat:
         metrics = {
             "skipped": True,
             "num_trajectories": 0,
@@ -345,17 +396,10 @@ def dr_grpo_update(model: MoleculeTransformer,
             logger.info(f"[DR-GRPO] {metrics}")
         return metrics
 
-    best_objective_score = float(max(r.reward for r in records)) if records else float("-inf")
+    best_objective_score = float(max(r.reward for r in all_records_flat)) if all_records_flat else float("-inf")
 
-    avg_novelty_bonus = 0.0
-    if novelty_memory is not None and getattr(config, "rl_use_novelty_bonus"):
-        novelty_beta = getattr(config, "rl_novelty_beta")
-        if novelty_beta > 0:
-            print(f"[RL] Applying novelty bonus with beta={novelty_beta:.4f}")
-            avg_novelty_bonus = apply_novelty_bonus(records, novelty_memory, novelty_beta)
-
-    normalize_adv = config.rl_advantage_normalize
-    baseline = compute_baseline_and_advantages(records, normalize=normalize_adv)
+    if total_bonus_count > 0:
+        avg_novelty_bonus /= total_bonus_count
 
     ppo_epochs = config.ppo_epochs
     total_policy_loss = 0
@@ -366,7 +410,7 @@ def dr_grpo_update(model: MoleculeTransformer,
 
         # The model weights are updated in-place on each iteration of this loop
         policy_loss_val, mean_entropy = streaming_replay_and_backward(
-            model, optimizer, records, config, device, autocast_ctx, scaler, i
+            model, optimizer, all_records_flat, config, device, autocast_ctx, scaler, i
         )
 
         # For logging, we can average the loss and entropy over the update epochs
@@ -376,14 +420,17 @@ def dr_grpo_update(model: MoleculeTransformer,
     total_policy_loss = total_policy_loss / ppo_epochs
     total_mean_entropy = total_mean_entropy / ppo_epochs
 
-    rewards = [r.reward for r in records]
-    advantages = [r.advantage for r in records]
+    rewards = [r.reward for r in all_records_flat]
+    advantages = [r.advantage for r in all_records_flat]
     mean_reward = sum(rewards) / len(rewards)
     mean_adv = sum(advantages) / len(advantages)
     std_adv = (sum((a - mean_adv) ** 2 for a in advantages) / len(advantages)) ** 0.5 if advantages else 0.0
 
+    # Calculate the mean of the *group baselines* for logging
+    mean_baseline = sum(all_baselines) / len(all_baselines) if all_baselines else 0.0
+
     metrics = {
-        "baseline": baseline,
+        "baseline": mean_baseline,
         "mean_reward": float(mean_reward),
         "best_reward": float(max(rewards)),
         "best_objective": best_objective_score,  # This is max(Objective)
@@ -391,8 +438,8 @@ def dr_grpo_update(model: MoleculeTransformer,
         "std_advantage": float(std_adv),
         "fraction_pos_adv": float(sum(a > 0 for a in advantages) / len(advantages)),
         "policy_loss": float(total_policy_loss),
-        "num_trajectories": len(records),
-        "mean_traj_length": float(sum(r.length for r in records) / len(records)) if records else 0.0,
+        "num_trajectories": len(all_records_flat),
+        "mean_traj_length": float(sum(r.length for r in all_records_flat) / len(all_records_flat)) if all_records_flat else 0.0,
         "invalid_dropped": nonfinite_dropped,
         "none_dropped": none_dropped,
         "amp_enabled": bool(getattr(config, "use_amp", False)),
