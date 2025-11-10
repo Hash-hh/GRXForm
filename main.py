@@ -143,6 +143,7 @@ def train_for_one_epoch_rl(epoch: int,
                            network_weights: dict,
                            optimizer: torch.optim.Optimizer,
                            objective_evaluator: MoleculeObjectiveEvaluator,
+                            gumbeldore_dataset: GumbeldoreDataset,
                            novelty_memory: Optional[dict] = None):
     """
     RL fine-tuning epoch:
@@ -151,7 +152,7 @@ def train_for_one_epoch_rl(epoch: int,
       3. Produce logging artifacts similar in spirit to supervised path.
     """
     print(f"[RL] Generating trajectories (epoch {epoch + 1})...")
-    gumbeldore_dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
+    # gumbeldore_dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
 
     # Return raw terminated trajectories (list of MoleculeDesign)
     trajectories = gumbeldore_dataset.generate_dataset(
@@ -388,7 +389,7 @@ if __name__ == '__main__':
 
     # Policy network
     network = MoleculeTransformer(config, config.training_device)
-    objective_evaluator = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
+    objective_eval = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
 
     # Load checkpoint if needed
     if config.load_checkpoint_from_path is not None:
@@ -446,6 +447,8 @@ if __name__ == '__main__':
         else:
             novelty_memory = None
 
+        gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=objective_eval)
+
         for epoch in range(config.num_epochs):
             print("------")
             network_weights = copy.deepcopy(network.get_weights())
@@ -455,7 +458,7 @@ if __name__ == '__main__':
 
             if rl_mode_active:
                 generated_loggable_dict, top20_text = train_for_one_epoch_rl(
-                    epoch, config, network, network_weights, optimizer, objective_evaluator,
+                    epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
                     novelty_memory=novelty_memory
                 )
                 # The last return value (the buffer data) is not needed in the main loop, so we use _
@@ -463,7 +466,7 @@ if __name__ == '__main__':
 
             else:  # Original Supervised-only mode
                 generated_loggable_dict, top20_text = train_for_one_epoch_supervised(
-                    epoch, config, network, network_weights, optimizer, objective_evaluator, best_validation_metric
+                    epoch, config, network, network_weights, optimizer, objective_eval, best_validation_metric
                 )
                 val_metric = generated_loggable_dict["best_gen_obj"]
 
@@ -563,7 +566,7 @@ if __name__ == '__main__':
 
     torch.cuda.empty_cache()
     with torch.no_grad():
-        test_loggable_dict, test_text_to_save = evaluate('test', config, network, objective_evaluator)
+        test_loggable_dict, test_text_to_save = evaluate('test', config, network, objective_eval)
     print(">> TEST")
     print(test_loggable_dict)
     logger.log_metrics(test_loggable_dict, step=0, step_desc="test")
