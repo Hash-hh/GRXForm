@@ -230,6 +230,7 @@ class GumbeldoreDataset:
                 if not group_result:
                     continue
 
+
                 # Check if it's BeamLeaf objects (from 'wor') or MoleculeDesign (from 'iid_mc')
                 if isinstance(group_result[0], sbs.BeamLeaf):
                     grouped_designs.append([leaf.state for leaf in group_result])
