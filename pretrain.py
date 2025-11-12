@@ -27,7 +27,7 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
                         optimizer: torch.optim.Optimizer, dataset: RandomMoleculeDataset, is_validation=False):
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=not is_validation, num_workers=config.num_dataloader_workers,
-                            pin_memory=True, persistent_workers=True)
+                            pin_memory=True, persistent_workers=False)
     metrics = dict()
     # Train for one epoch
     network.train() if not is_validation else network.eval()
@@ -62,7 +62,7 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
         loss_two = torch.tensor(0.) if torch.isnan(loss_two) else loss_two
         loss = loss_zero + config.scale_factor_level_one * loss_one + config.scale_factor_level_two * loss_two
 
-        if not is_validation:
+        if not is_validation:  # backward pass training
             # Optimization step
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -118,7 +118,7 @@ if __name__ == '__main__':
     config.training_device = training_device
     config.num_dataloader_workers = num_dataloader_workers
 
-    logger = Logger(args, config.results_path, config.log_to_file)
+    logger = Logger(args, config.results_path, config.log_to_file, config=config)
     logger.log_hyperparams(config)
     # Fix random number generator seed for better reproducibility
     np.random.seed(config.seed)
@@ -215,3 +215,5 @@ if __name__ == '__main__':
                 print(">> Got new best model.")
                 checkpoint["pretrain_best_validation_loss"] = generated_loggable_dict["full_loss"]
                 save_checkpoint(checkpoint, "best_model.pt", config)
+
+    logger.finish()
