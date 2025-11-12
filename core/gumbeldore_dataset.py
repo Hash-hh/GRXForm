@@ -151,6 +151,7 @@ class GumbeldoreDataset:
 
         if self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
             # We want one prompt to always be "C", so we sample N-1 from the library
+            # num_prompts_from_lib = self.config.num_prompts_per_epoch
             num_prompts_from_lib = self.config.num_prompts_per_epoch - 1
             if num_prompts_from_lib > 0:
                 sampled_smiles_list = random.sample(self.fragment_library, num_prompts_from_lib)
@@ -159,6 +160,7 @@ class GumbeldoreDataset:
 
             # Manually add the single Carbon atom as a prompt
             sampled_smiles_list.append("C")
+            # print(f"[GRPO] Sampling {num_prompts_from_lib} fragments")
             print(f"[GRPO] Sampling {num_prompts_from_lib} fragments + 1 'C' atom prompt.")
 
             # Create MoleculeDesign objects from these SMILES

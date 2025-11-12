@@ -245,6 +245,13 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 # Retrieve the old log probability from when the action was originally sampled
                 old_logp_float = rec.log_probs_history[cursor]
+
+                if not (math.isfinite(old_logp_float) and torch.isfinite(chosen_logp)):
+                    # We can't advance the clone if it's in a bad state,
+                    # so we must terminate this trajectory's replay.
+                    finished[local_idx] = True
+                    continue  # Skip to the next active trajectory in the microbatch
+
                 old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
                 ratio = torch.exp(chosen_logp - old_logp)
                 surr1 = ratio * advantage
@@ -332,20 +339,6 @@ def dr_grpo_update(model: MoleculeTransformer,
                    device: torch.device,
                    logger=None,
                    novelty_memory: Optional[dict] = None):
-    # records, none_dropped, nonfinite_dropped = filter_and_build_records(designs)
-    # if not records:
-    #     metrics = {
-    #         "skipped": True,
-    #         "num_trajectories": 0,
-    #         "mean_reward": float("-inf"),
-    #         "best_reward": float("-inf"),
-    #         "policy_loss": 0.0,
-    #         "invalid_dropped": nonfinite_dropped,
-    #         "none_dropped": none_dropped
-    #     }
-    #     if logger:
-    #         logger.info(f"[DR-GRPO] {metrics}")
-    #     return metrics
 
     all_records_flat: List[TrajectoryRecord] = []
     total_none_dropped = 0

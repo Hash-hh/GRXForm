@@ -1,9 +1,13 @@
 import time
 from tqdm import tqdm
+from rdkit import Chem  # Import RDKit
 
 # --- Configuration ---
-INPUT_FILE = "./data/FDB-17-fragmentset.smi"
-OUTPUT_FILE = "./data/FDB-17-filtered.txt"
+INPUT_FILE = "./data/GDB13_Subset_ABCDEFG.smi"
+OUTPUT_FILE = "./data/GDB13_Subset_ABCDEFG_filtered.txt"
+
+# INPUT_FILE = "./data/FDB-17-fragmentset.smi"
+# OUTPUT_FILE = "./data/FDB-17-filtered.txt"
 
 # Define the vocabulary filter up-front
 allowed_vocabulary = [  # put multi-character occurences first
@@ -26,10 +30,34 @@ def is_valid_vocabulary(smiles: str) -> bool:
     return len(temp) == 0
 
 
+def sanitize_and_canonicalize(smiles: str) -> str | None:
+    """
+    Sanitizes and canonicalizes a SMILES string using RDKit.
+    Returns the canonical SMILES string or None if the input is invalid.
+    """
+    try:
+        # MolFromSmiles automatically performs sanitization by default.
+        # If parsing fails (e.g., invalid structure), it returns None.
+        mol = Chem.MolFromSmiles(smiles)
+
+        if mol is None:
+            # RDKit failed to parse
+            return None
+
+        # MolToSmiles by default will create canonical SMILES.
+        # We set canonical=True explicitly for clarity.
+        canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
+        return canonical_smiles
+    except Exception:
+        # Catch any other potential RDKit errors
+        return None
+
+
 # --- Main Processing ---
-print(f"Starting filtering of {INPUT_FILE}...")
+print(f"Starting filtering and canonicalization of {INPUT_FILE}...")
 all_filtered_smiles = []
 lines_processed = 0
+rdkit_failures = 0
 
 # Get a total line count for a nice progress bar
 try:
@@ -44,7 +72,7 @@ start_time = time.time()
 
 # Read and filter in one pass
 with open(INPUT_FILE, 'r') as f:
-    for i, line in enumerate(tqdm(f, total=total_lines, desc="Reading and filtering")):
+    for i, line in enumerate(tqdm(f, total=total_lines, desc="Reading, filtering, and canonicalizing")):
         # if i == 0:  # Skip header
         #     continue
 
@@ -54,11 +82,24 @@ with open(INPUT_FILE, 'r') as f:
             s = line.rstrip().split()
             smiles = s[0]
 
-            # Apply both filters at once:
+            # --- Multi-step Filtering ---
+
             # 1. Must not be empty
+            if not smiles:
+                continue
+
             # 2. Must pass the vocabulary check
-            if len(smiles) > 0 and is_valid_vocabulary(smiles):
-                all_filtered_smiles.append(smiles)
+            if not is_valid_vocabulary(smiles):
+                continue
+
+            # 3. Must be valid, sanitizable, and canonicalizable by RDKit
+            canonical_smiles = sanitize_and_canonicalize(smiles)
+
+            if canonical_smiles:
+                all_filtered_smiles.append(canonical_smiles)
+            else:
+                # Passed vocab check but failed RDKit parsing
+                rdkit_failures += 1
 
         except IndexError:
             # Handle potential blank lines or lines without a tab
@@ -69,7 +110,8 @@ end_time = time.time()
 print("---")
 print(f"Processing complete in {end_time - start_time:.2f} seconds.")
 print(f"Processed {lines_processed:,} SMILES lines.")
-print(f"Found {len(all_filtered_smiles):,} valid and filtered SMILES.")
+print(f"Failed RDKit sanitization/canonicalization: {rdkit_failures:,}")
+print(f"Found {len(all_filtered_smiles):,} valid, filtered, and canonicalized SMILES.")
 
 # Save the single, huge output file
 print(f"Saving to {OUTPUT_FILE}...")
