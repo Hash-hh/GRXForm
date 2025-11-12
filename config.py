@@ -149,6 +149,7 @@ class MoleculeConfig:
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
         self.log_to_file = True
 
+
         # --- WandB Logging ---
         self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
