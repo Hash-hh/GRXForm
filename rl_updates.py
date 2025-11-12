@@ -194,7 +194,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
     # Slice into microbatches of trajectories
     for start in range(0, N, micro):
         batch_records = records[start:start + micro]
-        clones = [_fresh_initial_clone(r.design) for r in batch_records]
+        clones = [_fresh_initial_clone(r.design) for r in batch_records]  # replay
         cursors = [0] * len(batch_records)
         finished = [False] * len(batch_records)
 
@@ -239,7 +239,7 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
                     raise RuntimeError(f"[StreamingReplay] Action {action} out of bounds {log_probs.shape[0]}")
 
                 # DR. GRPO CLIPPED OBJECTIVE
-                chosen_logp = log_probs[action]
+                chosen_logp = log_probs[action]  # from new policy
                 # Get advantage
                 advantage = rec.advantage
 
