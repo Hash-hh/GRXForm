@@ -68,8 +68,8 @@ class MoleculeConfig:
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
         self.GHGNN_hidden_dim = 113
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
@@ -127,7 +127,7 @@ class MoleculeConfig:
             "num_samples_per_instance": 64,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 64,
+            "beam_width": 16,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -149,14 +149,24 @@ class MoleculeConfig:
         self.log_to_file = True
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_wor_64_samples"
+        self.wandb_run_name = f"{self.objective_type}_10_groups_wor_32_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
+
+        self.use_fragment_library = True  # Master switch for GRPO prompting
+        self.fragment_library_path = "data/FDB-17-filtered.txt"
+        # Number of prompts (scaffolds) to sample per epoch
+        self.num_prompts_per_epoch = 10
+
+        # K: Number of completions per prompt is already set by:
+        # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
+        # or
+        # self.gumbeldore_config["beam_width"] = ... (for wor/tasar)
 
         self.ppo_epochs = 1  # Number of GRPO iterations per RL update, for now keep 1 for simplicity (REINFORCE with baseline)
 
@@ -165,7 +175,7 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        self.rl_entropy_beta = 0.005
+        self.rl_entropy_beta = 0.
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
