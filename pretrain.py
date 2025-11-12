@@ -27,7 +27,7 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
                         optimizer: torch.optim.Optimizer, dataset: RandomMoleculeDataset, is_validation=False):
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=not is_validation, num_workers=config.num_dataloader_workers,
-                            pin_memory=True, persistent_workers=False)
+                            pin_memory=True, persistent_workers=True)
     metrics = dict()
     # Train for one epoch
     network.train() if not is_validation else network.eval()
