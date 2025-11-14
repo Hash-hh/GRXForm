@@ -563,6 +563,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                     if config.gumbeldore_config["search_type"] == "wor":
                         result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
                     elif config.gumbeldore_config["search_type"] == "tasar":
+                        # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
                         result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
                             :config.gumbeldore_config["num_trajectories_to_keep"]]]
                     # we need to sample a diverse set from the leaves beam_leaves_batch[j] which is already sorted in
