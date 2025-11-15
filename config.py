@@ -77,7 +77,6 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        # self.load_checkpoint_from_path = "results/median_2/last_model.pt"  # If given, model checkpoint is loaded from this path.
         self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
@@ -125,14 +124,13 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "tasar",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 64,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 32,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 64,
-            "replan_steps": 36,
-            # "replan_steps": 12,
+            "beam_width": 32,
+            "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "deterministic": False,  # Only use for gumbeldore_eval=True below, switches to regular beam search.
@@ -152,8 +150,6 @@ class MoleculeConfig:
                                          datetime.datetime.now().strftime(
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
 
-        # self.results_path = 'results/median_2'
-
         self.log_to_file = True
 
 
@@ -161,13 +157,13 @@ class MoleculeConfig:
         self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_1_group_wor_64_samples"
+        self.wandb_run_name = f"{self.objective_type}_5_groups_wor_32_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.use_fragment_library = False  # Master switch for GRPO prompting
+        self.use_fragment_library = True  # Master switch for GRPO prompting
         self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 5
@@ -199,7 +195,7 @@ class MoleculeConfig:
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
 
         # Advantage / baseline
-        self.rl_advantage_normalize = True  # (Optional) Normalize trajectory advantages; leave False for Dr. GRPO
+        self.rl_advantage_normalize = False  # (Optional) Normalize trajectory advantages; leave False for Dr. GRPO
 
         # self.rl_global_normalize = False # Globally normalize advantage by dividing by std
 

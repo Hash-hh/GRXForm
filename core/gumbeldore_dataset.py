@@ -163,6 +163,8 @@ class GumbeldoreDataset:
             # print(f"[GRPO] Sampling {num_prompts_from_lib} fragments")
             print(f"[GRPO] Sampling {num_prompts_from_lib} fragments + 1 'C' atom prompt.")
 
+            # print(sampled_smiles_list)
+
             # Create MoleculeDesign objects from these SMILES
             problem_instances = []
             for smi in sampled_smiles_list:
