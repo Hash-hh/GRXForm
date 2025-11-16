@@ -164,7 +164,8 @@ class MoleculeConfig:
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
         self.use_fragment_library = True  # Master switch for GRPO prompting
-        self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
+        self.fragment_library_path = "data/GDB17.50000000LL.noSR_filtered.txt"
+        # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 5
 

@@ -3,8 +3,11 @@ from tqdm import tqdm
 from rdkit import Chem  # Import RDKit
 
 # --- Configuration ---
-INPUT_FILE = "./data/GDB13_Subset_ABCDEFG.smi"
-OUTPUT_FILE = "./data/GDB13_Subset_ABCDEFG_filtered.txt"
+# INPUT_FILE = "./data/GDB13_Subset_ABCDEFG.smi"
+# OUTPUT_FILE = "./data/GDB13_Subset_ABCDEFG_filtered.txt"
+
+INPUT_FILE = "./data/GDB17.50000000LL.noSR"
+OUTPUT_FILE = "./data/GDB17.50000000LL.noSR_filtered.txt"
 
 # INPUT_FILE = "./data/FDB-17-fragmentset.smi"
 # OUTPUT_FILE = "./data/FDB-17-filtered.txt"
@@ -30,12 +33,15 @@ def is_valid_vocabulary(smiles: str) -> bool:
     return len(temp) == 0
 
 
-def sanitize_and_canonicalize(smiles: str) -> str | None:
+def sanitize_and_canonicalize(smiles: str, do_something=False) -> str | None:
     """
     Sanitizes and canonicalizes a SMILES string using RDKit.
     Returns the canonical SMILES string or None if the input is invalid.
     """
     try:
+        if not do_something:
+            return smiles
+
         # MolFromSmiles automatically performs sanitization by default.
         # If parsing fails (e.g., invalid structure), it returns None.
         mol = Chem.MolFromSmiles(smiles)
