@@ -394,7 +394,7 @@ if __name__ == '__main__':
     # Load checkpoint if needed
     if config.load_checkpoint_from_path is not None:
         print(f"Loading checkpoint from path {config.load_checkpoint_from_path}")
-        checkpoint = torch.load(config.load_checkpoint_from_path)
+        checkpoint = torch.load(config.load_checkpoint_from_path, weights_only=False)
         print(f"{checkpoint['epochs_trained']} episodes have been trained in the loaded checkpoint.")
     else:
         checkpoint = {
