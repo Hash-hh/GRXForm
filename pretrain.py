@@ -27,7 +27,7 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
                         optimizer: torch.optim.Optimizer, dataset: RandomMoleculeDataset, is_validation=False):
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=not is_validation, num_workers=config.num_dataloader_workers,
-                            pin_memory=True, persistent_workers=True)
+                            pin_memory=True, persistent_workers=False)
     metrics = dict()
     # Train for one epoch
     network.train() if not is_validation else network.eval()
@@ -95,11 +95,11 @@ if __name__ == '__main__':
     pretrain_train_dataset = "./data/chembl/pretrain_sequences/chembl_train.pickle"
     pretrain_val_dataset = "./data/chembl/pretrain_sequences/chembl_valid.pickle"
     pretrain_num_epochs = 1000
-    batch_size = 512
+    batch_size = 32
     num_batches_per_epoch = 3000
     batch_size_validation = 512
     training_device = "cuda:0"  # Device on which to train.
-    num_dataloader_workers = 10  # Number of dataloader workers for creating batches for training
+    num_dataloader_workers = 0  # Number of dataloader workers for creating batches for training
     load_checkpoint_from_path = None
 
     print(">> Pretraining Molecule Design")
