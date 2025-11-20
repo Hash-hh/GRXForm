@@ -193,6 +193,123 @@ class MoleculeObjectiveEvaluator:
             scaffold_hop=guacamol_goal_directed_suite[19]
         )
 
+        self.oracle_cache = {}
+
+    # def predict_objective(self, molecule_designs: List[Union[MoleculeDesign, str]]) -> np.array:
+    #     """
+    #     Takes list of molecules (either as `MoleculeDesign` or directly as SMILES string
+    #     and predicts the objective function on them. Returns the objectives as a numpy array.
+    #     """
+    #
+    #     # 1. Initialize results array with -inf
+    #     all_objs = np.full(len(molecule_designs), -np.inf)
+    #
+    #     # 2. Identify which molecules are in cache vs need computation
+    #     indices_to_compute = []
+    #     designs_to_compute = []
+    #
+    #     # We need to map index -> canonical_smiles to update cache later
+    #     idx_to_canonical = {}
+    #
+    #     for i, design in enumerate(molecule_designs):
+    #         # Extract SMILES
+    #         if isinstance(design, MoleculeDesign):
+    #             smi = design.smiles_string
+    #         else:
+    #             smi = design  # It's a string
+    #
+    #         # Canonicalize to ensure cache hits (e.g. c1ccccc1 vs C1=CC=CC=C1)
+    #         # If invalid, it stays -inf
+    #         try:
+    #             if not smi:
+    #                 continue
+    #             can_smi = Chem.CanonSmiles(smi)
+    #         except:
+    #             continue
+    #
+    #         idx_to_canonical[i] = can_smi
+    #
+    #         # Check Cache
+    #         if can_smi in self.oracle_cache:
+    #             score = self.oracle_cache[can_smi]
+    #             all_objs[i] = score
+    #             # If it's a design object, update it directly too
+    #             if isinstance(design, MoleculeDesign):
+    #                 design.objective = score
+    #         else:
+    #             indices_to_compute.append(i)
+    #             designs_to_compute.append(design)
+    #
+    #     # 3. If everything was cached, return immediately
+    #     if not designs_to_compute:
+    #         return all_objs
+    #
+    #     # 4. Perform computation ONLY on the non-cached subset
+    #     # --- [Existing Logic applied to designs_to_compute] ---
+    #
+    #     feasible_molecules: List[Chem.RWMol] = []
+    #     feasible_idcs_rel = []  # relative indices within designs_to_compute
+    #
+    #     for i, mol in enumerate(designs_to_compute):
+    #         if isinstance(mol, MoleculeDesign):
+    #             assert mol.synthesis_done
+    #             if not self.infeasible_by_special_constraints(mol):
+    #                 feasible_idcs_rel.append(i)
+    #                 feasible_molecules.append(mol.rdkit_mol)
+    #         elif mol != "C":
+    #             try:
+    #                 mol_rd = Chem.MolFromSmiles(mol)
+    #                 Chem.SanitizeMol(mol_rd)
+    #                 feasible_idcs_rel.append(i)
+    #                 feasible_molecules.append(mol_rd)
+    #             except:
+    #                 continue
+    #
+    #     # Compute scores for the feasible subset
+    #     computed_scores_subset = np.array([])
+    #
+    #     if len(feasible_molecules) > 0:
+    #         if self.config.objective_type in self.guacamol_benchmarks:
+    #             computed_scores_subset = np.array([
+    #                 self.guacamol_benchmarks[self.config.objective_type].objective.score(
+    #                     Chem.MolToSmiles(rdkit_mol)
+    #                 )
+    #                 for rdkit_mol in feasible_molecules
+    #             ])
+    #         else:
+    #             num_per_worker = math.ceil(len(feasible_molecules) / len(self.predictor_workers))
+    #             future_objs = [
+    #                 worker.predict_objectives_from_rdkit_mols.remote(
+    #                     feasible_molecules[i * num_per_worker: (i + 1) * num_per_worker]
+    #                 )
+    #                 for i, worker in enumerate(self.predictor_workers)
+    #             ]
+    #             future_objs = ray.get(future_objs)
+    #             computed_scores_subset = np.concatenate(future_objs)
+    #
+    #     # 5. Map computed scores back to the main results array and update Cache
+    #     # We iterate over the feasible results we just got
+    #     for rel_idx, score in enumerate(computed_scores_subset):
+    #         # Get the index in designs_to_compute
+    #         idx_in_subset = feasible_idcs_rel[rel_idx]
+    #         # Get the original global index
+    #         global_idx = indices_to_compute[idx_in_subset]
+    #
+    #         # Update result
+    #         all_objs[global_idx] = score
+    #
+    #         # Update Design Object if applicable
+    #         original_design = molecule_designs[global_idx]
+    #         if isinstance(original_design, MoleculeDesign):
+    #             original_design.objective = score
+    #
+    #         # Update Cache
+    #         if global_idx in idx_to_canonical:
+    #             can_smi = idx_to_canonical[global_idx]
+    #             self.oracle_cache[can_smi] = score
+    #
+    #     return all_objs
+
     def predict_objective(self, molecule_designs: List[Union[MoleculeDesign, str]]) -> np.array:
         """
         Takes list of molecules (either as `MoleculeDesign` or directly as SMILES string
