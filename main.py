@@ -499,7 +499,7 @@ if __name__ == '__main__':
                 checkpoint["best_validation_metric"] = best_validation_metric
                 save_checkpoint(checkpoint, "best_model.pt", config)
 
-            # WandB logging
+            # WandB logging:
             if hasattr(config, 'use_wandb') and config.use_wandb:
                 wandb_log = {
                     "epoch": checkpoint["epochs_trained"],
