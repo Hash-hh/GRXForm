@@ -18,8 +18,8 @@ for datatype in datatypes:
     molecules: List[Tuple[Chem.RWMol, str]] = []
     molecule_designs: List[dict] = []
 
-    path_to_smiles = f"./data/chembl/chembl_{datatype}_filtered.smiles"
-    destination_path = f"./data/chembl/pretrain_sequences/chembl_{datatype}.pickle"
+    path_to_smiles = f"./data/zinc/zinc_{datatype}_filtered.smiles"
+    destination_path = f"./data/zinc/pretrain_sequences/zinc_{datatype}.pickle"
     limit_num_smiles_to = None  # Set to `None` to process all
 
     num_differing_smiles = 0

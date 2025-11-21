@@ -39,8 +39,8 @@ def apply_novelty_bonus(records: List[TrajectoryRecord],
         global_count = memory.get(smiles, 0)
         batch_count = new_smiles_in_batch.get(smiles, 0)
         total_count = global_count + batch_count
-        # if total_count != 0:
-        #     print(f"[DR-GRPO] Novelty bonus: SMILES {smiles} seen {total_count} times before.")
+        if total_count != 0:
+            print(f"[DR-GRPO] Novelty bonus: SMILES {smiles} seen {total_count} times before.")
 
         # Calculate bonus and add it to the record's reward
         novelty_bonus = 1.0 / math.sqrt(total_count + 1)
