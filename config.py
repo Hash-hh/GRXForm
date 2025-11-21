@@ -7,8 +7,8 @@ class MoleculeConfig:
         self.seed = 42
 
         # Network and environment
-        self.latent_dimension = 1024
-        self.num_transformer_blocks = 16
+        self.latent_dimension = 512
+        self.num_transformer_blocks = 10
         self.num_heads = 16
         self.dropout = 0.
         self.use_rezero_transformer = True
@@ -68,22 +68,25 @@ class MoleculeConfig:
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
         self.GHGNN_hidden_dim = 113
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.num_predictor_workers = 0  # num of parallel workers that operate on a given list of molecules
-        # self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
+        # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
+        self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
+        # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
         self.load_checkpoint_from_path = None # "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 2  #10  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 1  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 10000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 1400  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -124,10 +127,10 @@ class MoleculeConfig:
 
             "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 64,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 8,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 64,
+            "beam_width": 8,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -139,6 +142,7 @@ class MoleculeConfig:
             # "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
             # "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
             # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
+            # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             # "stratified_allow_shortfall_fill": True
         }
 
@@ -146,17 +150,30 @@ class MoleculeConfig:
         self.results_path = os.path.join("./results",
                                          datetime.datetime.now().strftime(
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+
         self.log_to_file = True
 
+
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
-        self.wandb_project = "graphxform-pretraining"
+        self.use_wandb = False  # Master switch for WandB logging
+        self.wandb_project = "graphxform-rl"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"Pretraining_latent{self.latent_dimension}_blocks{self.num_transformer_blocks}_heads{self.num_heads}"
+        self.wandb_run_name = f"{self.objective_type}_1_group_wor_8_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
+
+        self.use_fragment_library = False  # Master switch for GRPO prompting
+        self.fragment_library_path = "data/GDB17.50000000LL.noSR_filtered.txt"
+        # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
+        # Number of prompts (scaffolds) to sample per epoch
+        self.num_prompts_per_epoch = 5
+
+        # K: Number of completions per prompt is already set by:
+        # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
+        # or
+        # self.gumbeldore_config["beam_width"] = ... (for wor/tasar)
 
         self.ppo_epochs = 1  # Number of GRPO iterations per RL update, for now keep 1 for simplicity (REINFORCE with baseline)
 
@@ -165,7 +182,8 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        self.rl_entropy_beta = 0.005
+        self.rl_entropy_beta = 0.
+        # self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
@@ -173,13 +191,15 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
 
         # Advantage / baseline
         self.rl_advantage_normalize = False  # (Optional) Normalize trajectory advantages; leave False for Dr. GRPO
+
+        # self.rl_global_normalize = False # Globally normalize advantage by dividing by std
 
         # Trajectory / logging options
         self.rl_store_trajectories_path = None  # Optional: path to pickle recent trajectories
