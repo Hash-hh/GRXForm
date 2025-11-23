@@ -285,13 +285,17 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
         actor_handle,  # Pass handle
         memory_aggressive=False
     )
-    top_20_mols = metrics["top_20_molecules"]
+
+    print(metrics)
+
     metrics = {
         f"{eval_type}_mean_top_20_obj": metrics["mean_top_20_obj"],
         f"{eval_type}_mean_top_20_sa_score": metrics["mean_top_20_sa_score"],
         f"{eval_type}_best_obj": metrics['best_gen_obj'],
         f"{eval_type}_best_mol_sa_score": metrics['best_gen_sa_score'],
     }
+
+    top_20_mols = metrics["top_20_molecules"]
     print("Evaluation done")
     print(f"Eval ({eval_type}) best obj: {metrics[f'{eval_type}_best_obj']:.3f}")
     print(f"Eval ({eval_type}) mean top 20 obj: {metrics[f'{eval_type}_mean_top_20_obj']:.3f}")
@@ -458,6 +462,9 @@ if __name__ == '__main__':
     print(f"Policy network is on device {config.training_device}")
     network.to(network.device)
     network.eval()
+
+
+
 
     if config.num_epochs > 0:
         print(f"Starting training for {config.num_epochs} epochs.")
@@ -634,7 +641,7 @@ if __name__ == '__main__':
                 print("Time exceeded. Stopping training.")
                 break
 
-    if config.num_epochs == 0:
+    elif config.num_epochs == 0:
         print(f"Testing with loaded model.")
     else:
         print(f"Testing with best model.")
@@ -647,6 +654,16 @@ if __name__ == '__main__':
 
     if checkpoint["model_weights"] is None and config.num_epochs == 0:
         print("WARNING! No training performed and no checkpoint loaded. Evaluating random model.")
+
+
+
+    print("Initializing Central Oracle Actor...")
+    central_oracle = CentralOracle.remote(config)
+
+    # Create a local proxy to pass around (keeps interface clean)
+    evaluator_proxy = RemoteEvaluatorProxy(central_oracle)
+
+
 
     torch.cuda.empty_cache()
     with torch.no_grad():

@@ -7,14 +7,23 @@ from tdc import Oracle
 from config import MoleculeConfig
 from molecule_design import MoleculeDesign
 
+import ray
+import torch
+import numpy as np
+import os
+import time
+from typing import List, Union, Dict, Tuple
+from rdkit import Chem, RDLogger
+from tdc import Oracle
+from config import MoleculeConfig
+from molecule_design import MoleculeDesign
+
 
 @ray.remote
 class CentralOracle:
     """
     A Singleton Ray Actor that maintains the Global Cache and Budget.
-    All workers send SMILES here. This ensures:
-    1. We never re-evaluate duplicates (Sample Efficiency).
-    2. We count exactly 10,000 unique evaluations.
+    Logs Top-10 progress continuously for precise PMO AUC calculation.
     """
 
     def __init__(self, config: MoleculeConfig):
@@ -23,7 +32,18 @@ class CentralOracle:
         self.global_cache: Dict[str, float] = {}
         self.unique_calls = 0
         self.budget_exceeded = False
-        self.max_budget = 10000  # Hard PMO limit
+        self.max_budget = 10000
+
+        # Tracking for AUC
+        self.all_valid_molecules: List[Tuple[float, str]] = []  # (score, smiles)
+        self.log_file_path = os.path.join(self.config.results_path, "pmo_tracker.txt")
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self.log_file_path), exist_ok=True)
+
+        # Initialize log file
+        with open(self.log_file_path, "w") as f:
+            f.write("Calls\tTop10_Avg\tTop10_Molecules\n")
 
         # Initialize TDC Oracle
         try:
@@ -33,6 +53,31 @@ class CentralOracle:
             print(f"[CentralOracle] Error initializing oracle: {e}")
             self.oracle = None
 
+    def _update_tracker(self):
+        """
+        Updates the Top-10 list and logs the current state to file.
+        """
+        # Sort by score descending
+        self.all_valid_molecules.sort(key=lambda x: x[0], reverse=True)
+
+        # Keep top 100 internally to save memory if run is long,
+        # but strictly we only need top 10 for the metric.
+        if len(self.all_valid_molecules) > 100:
+            self.all_valid_molecules = self.all_valid_molecules[:100]
+
+        top_10 = self.all_valid_molecules[:10]
+
+        if not top_10:
+            avg_score = 0.0
+            mol_str = ""
+        else:
+            avg_score = sum(x[0] for x in top_10) / len(top_10)
+            mol_str = ";".join([f"{x[1]}:{x[0]:.4f}" for x in top_10])
+
+        # Log Format: UniqueCalls <TAB> Top10Mean <TAB> MolData
+        with open(self.log_file_path, "a") as f:
+            f.write(f"{self.unique_calls}\t{avg_score:.6f}\t{mol_str}\n")
+
     def get_budget_status(self):
         """Returns (current_usage, is_exceeded)"""
         return self.unique_calls, self.budget_exceeded
@@ -40,11 +85,10 @@ class CentralOracle:
     def predict_batch(self, smiles_list: List[str]) -> List[float]:
         """
         Evaluates a batch of SMILES.
-        - If in cache: return cached value (Cost = 0).
-        - If new: evaluate, add to cache, increment counter (Cost = 1).
-        - If budget exceeded: return -infinity.
+        Logs progress after processing the batch.
         """
         results = []
+        new_unique_found = False
 
         for smi in smiles_list:
             # 1. Check Validity & Canonicalize
@@ -58,8 +102,7 @@ class CentralOracle:
                 results.append(float("-inf"))
                 continue
 
-            # --- FIX: Explicitly ignore trivial "C" (Methane) ---
-            # This prevents trivial initialization prompts from consuming budget
+            # Ignore trivial "C"
             if canon_smi == "C":
                 results.append(float("-inf"))
                 continue
@@ -72,20 +115,27 @@ class CentralOracle:
             # 3. Check Budget
             if self.unique_calls >= self.max_budget:
                 self.budget_exceeded = True
-                results.append(float("-inf"))  # Soft fail for search
+                results.append(float("-inf"))
                 continue
 
             # 4. Evaluate (Cost)
             try:
                 score = self.oracle(canon_smi)
-                # PMO specific: some metrics might need sign flipping?
-                # TDC usually returns maximization scores, which aligns with your code.
             except:
                 score = float("-inf")
 
             self.global_cache[canon_smi] = score
             self.unique_calls += 1
             results.append(score)
+
+            # Add to tracking list if valid
+            if score > float("-inf"):
+                self.all_valid_molecules.append((score, canon_smi))
+                new_unique_found = True
+
+        # Log update if we found anything new
+        if new_unique_found:
+            self._update_tracker()
 
         return results
 
