@@ -3,13 +3,13 @@ import copy
 import importlib
 import os
 import time
-from typing import List, Optional
+from typing import Optional, List
 
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import pickle
+# import pickle
 
 from logger import Logger
 from molecule_dataset import RandomMoleculeDataset
@@ -23,8 +23,9 @@ import wandb
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
-from molecule_evaluator import MoleculeObjectiveEvaluator
-from rl_updates import dr_grpo_update, TrajectoryRecord
+from molecule_evaluator import CentralOracle, RemoteEvaluatorProxy
+from rl_updates import dr_grpo_update
+import chem_utils
 
 
 def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
@@ -32,21 +33,41 @@ def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     path = os.path.join(config.results_path, filename)
     torch.save(checkpoint, path)
 
+
 def train_for_one_epoch_supervised(epoch: int,
                                    config: MoleculeConfig,
                                    network: MoleculeTransformer,
                                    network_weights: dict,
                                    optimizer: torch.optim.Optimizer,
-                                   objective_evaluator: MoleculeObjectiveEvaluator,
+                                   objective_evaluator,  # Accepts Proxy
                                    best_objective: float):
     """
     Original supervised fine-tuning path (dataset generation + cross-entropy on heads).
     """
+    # For supervised mode, we assume objective_evaluator is compatible (e.g. RemoteEvaluatorProxy)
+    # But supervised mode typically trains on generated data, so it needs generation logic.
+    # GumbeldoreDataset init requires an evaluator.
+
+    # NOTE: To minimize changes, we initialize GumbeldoreDataset here as before
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
+
+    # Generate dataset expects a handle in the new signature.
+    # Since supervised mode calls generate_dataset, and we updated that signature in gumbeldore_dataset.py:
+    # generate_dataset(self, network_weights, central_oracle_handle, ...)
+    # We need to extract the handle from the proxy if available, or pass the proxy itself if the worker supports it.
+    # However, gumbeldore_dataset.generate_dataset passes 'central_oracle_handle' to 'async_sbs_worker'.
+    # 'async_sbs_worker' then wraps it in 'RemoteEvaluatorProxy'.
+    # Therefore, we need the underlying ACTOR HANDLE here, not the proxy.
+
+    # FIX: We need to pass the actor handle to this function or extract it.
+    # Assuming 'objective_evaluator' passed in is 'evaluator_proxy'.
+    actor_handle = objective_evaluator.actor
+
     metrics = gumbeldore_dataset.generate_dataset(
         network_weights,
+        actor_handle,  # Pass the actor handle
         best_objective=best_objective,
         memory_aggressive=False
     )
@@ -137,28 +158,38 @@ def train_for_one_epoch_supervised(epoch: int,
     del metrics["top_20_molecules"]
     return metrics, top_20_molecules
 
+
 def train_for_one_epoch_rl(epoch: int,
                            config: MoleculeConfig,
                            network: MoleculeTransformer,
                            network_weights: dict,
                            optimizer: torch.optim.Optimizer,
-                           objective_evaluator: MoleculeObjectiveEvaluator,
-                            gumbeldore_dataset: GumbeldoreDataset,
-                           novelty_memory: Optional[dict] = None):
+                           central_oracle_handle,  # CHANGED: Accept actor handle directly
+                           gumbeldore_dataset: GumbeldoreDataset,
+                           novelty_memory: Optional[dict] = None,
+                           hall_of_fame: Optional[List[dict]] = None):
     """
     RL fine-tuning epoch:
       1. Generate trajectories (terminated molecules) with current policy.
       2. Run policy gradient update via dr_grpo_update.
       3. Produce logging artifacts similar in spirit to supervised path.
     """
-    print(f"[RL] Generating trajectories (epoch {epoch + 1})...")
-    # gumbeldore_dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
+    # 1. Pick ONE prompt for this epoch (C or Elite)
+    # We pass it as a list of length 1.
+    elite_prompt_prob = config.elite_prompt_prob
+    prompt_str = chem_utils.sample_prompt_for_epoch(hall_of_fame, elite_prob=elite_prompt_prob)
 
-    # Return raw terminated trajectories (list of MoleculeDesign)
+    print(f"[RL] Epoch {epoch + 1}: Prompt='{prompt_str}'")
+
+    print(f"[RL] Generating trajectories (epoch {epoch + 1})...")
+
+    # CHANGED: Pass central_oracle_handle to generate_dataset
     trajectories = gumbeldore_dataset.generate_dataset(
         network_weights=network_weights,
+        central_oracle_handle=central_oracle_handle,
         best_objective=None,
-        memory_aggressive=False
+        memory_aggressive=False,
+        custom_prompts=[prompt_str]
     )
 
     if not trajectories or not any(trajectories):
@@ -225,10 +256,17 @@ def train_for_one_epoch_rl(epoch: int,
     if not top20:
         top_20_text_lines.append("No terminated molecules")
 
-    return metrics, top_20_text_lines
+    # 4. Collect raw trajectories for HoF update in main loop
+    # Flatten the group structure
+    flat_trajectories = []
+    for group in trajectories:
+        flat_trajectories.extend(group)
+
+    return metrics, top_20_text_lines, flat_trajectories
+
 
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
-             objective_evaluator: MoleculeObjectiveEvaluator):
+             objective_evaluator):  # Accepts Proxy
     """
     Uses generation (supervised-style metrics) for evaluation irrespective of RL training.
     """
@@ -238,7 +276,15 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
-    metrics = gumbeldore_dataset.generate_dataset(copy.deepcopy(network.get_weights()), memory_aggressive=False)
+
+    # CHANGED: Extract handle from proxy for generate_dataset
+    actor_handle = objective_evaluator.actor
+
+    metrics = gumbeldore_dataset.generate_dataset(
+        copy.deepcopy(network.get_weights()),
+        actor_handle,  # Pass handle
+        memory_aggressive=False
+    )
     top_20_mols = metrics["top_20_molecules"]
     metrics = {
         f"{eval_type}_mean_top_20_obj": metrics["mean_top_20_obj"],
@@ -251,6 +297,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print(f"Eval ({eval_type}) mean top 20 obj: {metrics[f'{eval_type}_mean_top_20_obj']:.3f}")
 
     return metrics, top_20_mols
+
 
 if __name__ == '__main__':
     print(">> Molecule Design")
@@ -306,7 +353,7 @@ if __name__ == '__main__':
             config=flat_config
         )
 
-        config.optimizer["lr"] = wandb.config.get('optimizer.lr', config.optimizer["lr"]) # Example
+        config.optimizer["lr"] = wandb.config.get('optimizer.lr', config.optimizer["lr"])  # Example
         config.rl_entropy_beta = wandb.config.get('rl_entropy_beta', config.rl_entropy_beta)
         config.ppo_epochs = wandb.config.get('ppo_epochs', config.ppo_epochs)
         config.rl_ppo_clip_epsilon = wandb.config.get('rl_ppo_clip_epsilon', config.rl_ppo_clip_epsilon)
@@ -389,7 +436,7 @@ if __name__ == '__main__':
 
     # Policy network
     network = MoleculeTransformer(config, config.training_device)
-    objective_eval = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
+    # objective_eval = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
 
     # Load checkpoint if needed
     if config.load_checkpoint_from_path is not None:
@@ -447,7 +494,20 @@ if __name__ == '__main__':
         else:
             novelty_memory = None
 
-        gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=objective_eval)
+        # gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=objective_eval)
+
+        print("Initializing Central Oracle Actor...")
+        central_oracle = CentralOracle.remote(config)
+
+        # Create a local proxy to pass around (keeps interface clean)
+        evaluator_proxy = RemoteEvaluatorProxy(central_oracle)
+
+        # Initialize dataset with proxy
+        gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=evaluator_proxy)
+
+        hall_of_fame = []
+        max_size_hof = config.max_size_hof
+        similarity_threshold_hof = config.similarity_threshold_hof
 
         for epoch in range(config.num_epochs):
             print("------")
@@ -456,17 +516,41 @@ if __name__ == '__main__':
             if novelty_memory is not None:
                 print(f"Start of Epoch {epoch + 1}: Novelty memory contains {len(novelty_memory)} unique SMILES.")
 
+            # 2. Check Budget BEFORE starting an epoch
+            current_calls, is_done = ray.get(central_oracle.get_budget_status.remote())
+            print(f">> PMO Budget Status: {current_calls}/10000 unique calls.")
+
+            if is_done or current_calls >= 10000:
+                print(">> PMO Budget (10,000) Reached. Stopping Training.")
+                break
+
             if rl_mode_active:
-                generated_loggable_dict, top20_text = train_for_one_epoch_rl(
-                    epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
-                    novelty_memory=novelty_memory
+                generated_loggable_dict, top20_text, raw_trajectories = train_for_one_epoch_rl(
+                    epoch, config, network, network_weights, optimizer, central_oracle, gumbeldore_dset,
+                    novelty_memory=novelty_memory,
+                    hall_of_fame=hall_of_fame
                 )
+                # --- UPDATE HALL OF FAME ---
+                candidates = []
+                for mol in raw_trajectories:
+                    # Only consider valid, terminated molecules with valid scores
+                    if mol.objective is not None and mol.objective > float("-inf") and mol.smiles_string:
+                        candidates.append({
+                            'smiles': mol.smiles_string,
+                            'obj': float(mol.objective)
+                        })
+
+                hall_of_fame = chem_utils.update_hall_of_fame(hall_of_fame, candidates, max_size=max_size_hof,
+                                                                similarity_threshold=similarity_threshold_hof)
+
+                if len(hall_of_fame) > 0:
+                    print(f"     [HoF] Size: {len(hall_of_fame)} | Best: {hall_of_fame[0]['obj']:.4f}")
                 # The last return value (the buffer data) is not needed in the main loop, so we use _
                 val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
 
             else:  # Original Supervised-only mode
                 generated_loggable_dict, top20_text = train_for_one_epoch_supervised(
-                    epoch, config, network, network_weights, optimizer, objective_eval, best_validation_metric
+                    epoch, config, network, network_weights, optimizer, evaluator_proxy, best_validation_metric
                 )
                 val_metric = generated_loggable_dict["best_gen_obj"]
 
@@ -566,7 +650,7 @@ if __name__ == '__main__':
 
     torch.cuda.empty_cache()
     with torch.no_grad():
-        test_loggable_dict, test_text_to_save = evaluate('test', config, network, objective_eval)
+        test_loggable_dict, test_text_to_save = evaluate('test', config, network, evaluator_proxy)
     print(">> TEST")
     print(test_loggable_dict)
     logger.log_metrics(test_loggable_dict, step=0, step_desc="test")

@@ -67,9 +67,15 @@ class MoleculeConfig:
         # Objective molecule predictor
         self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
         self.GHGNN_hidden_dim = 113
+        # --- PMO / TDC Configuration ---
+        # Common PMO Tasks:
+        # 'drd2', 'gsk3b', 'jnk3', 'qed'
+        # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
+        # 'deco_hop', 'scaffold_hop'
+        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         # self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
@@ -86,7 +92,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 1  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1400  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 2000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -155,14 +161,18 @@ class MoleculeConfig:
 
 
         # --- WandB Logging ---
-        self.use_wandb = False  # Master switch for WandB logging
+        self.use_wandb = True  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_1_group_wor_8_samples_novelty"
+        self.wandb_run_name = f"{self.objective_type}_1_group_wor_10_samples"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
+
+        self.max_size_hof = 1  # Maximum size of the Hall of Fame (HoF)
+        self.similarity_threshold_hof = 0.75  # Tanimoto similarity threshold for HoF updates
+        self.elite_prompt_prob = 0  # Probability of selecting an elite scaffold from HoF as prompt
 
         self.use_fragment_library = False  # Master switch for GRPO prompting
         self.fragment_library_path = "data/GDB17.50000000LL.noSR_filtered.txt"
@@ -182,8 +192,8 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        self.rl_entropy_beta = 0.
-        # self.rl_entropy_beta = 0.001
+        # self.rl_entropy_beta = 0.
+        self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus

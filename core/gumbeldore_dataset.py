@@ -9,7 +9,7 @@ os.environ["RAY_DEDUP_LOGS"] = "0"
 import sys
 import ray
 import torch
-import time
+# import time
 import numpy as np
 from ray.thirdparty_files import psutil
 from tqdm import tqdm
@@ -24,7 +24,7 @@ from core.incremental_sbs import IncrementalSBS
 
 import random
 from config import MoleculeConfig
-from molecule_evaluator import MoleculeObjectiveEvaluator
+from molecule_evaluator import RemoteEvaluatorProxy
 
 from contextlib import nullcontext
 from rl_updates import _make_autocast_ctx
@@ -118,7 +118,7 @@ class JobPool:
 
 class GumbeldoreDataset:
     def __init__(self, config: MoleculeConfig,
-                 objective_evaluator: MoleculeObjectiveEvaluator
+                 objective_evaluator: Any  # Typed as Any to accept Proxy or Evaluator
                  ):
         self.config = config
         self.gumbeldore_config = config.gumbeldore_config
@@ -133,11 +133,13 @@ class GumbeldoreDataset:
                 raise FileNotFoundError("Fragment file is empty.")
             print(f"[GRPO] Loaded {len(self.fragment_library)} fragments from {config.fragment_library_path}.")
 
-    def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
-                         memory_aggressive: bool = False):
+    def generate_dataset(self, network_weights: dict, central_oracle_handle, best_objective: Optional[float] = None,
+                         memory_aggressive: bool = False,
+                         custom_prompts: Optional[List[str]] = None):
         """
         Parameters:
             network_weights: [dict] Network weights to use for generating data.
+            central_oracle_handle: Ray actor handle for the CentralOracle.
             memory_aggressive: [bool] If True, IncrementalSBS is performed "memory aggressive" meaning that
                 intermediate states in the search tree are not stored after transitioning from them, only their
                 policies.
@@ -149,7 +151,22 @@ class GumbeldoreDataset:
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                           self.gumbeldore_config["batch_size_per_cpu_worker"])
 
-        if self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
+        if custom_prompts is not None and len(custom_prompts) > 0:
+            # [PMO Strategy] Use specific prompts (e.g. "C" or "Elite Scaffold")
+            problem_instances = []
+            for smi in custom_prompts:
+                try:
+                    # do_finish=False treats it as a partial graph (prompt)
+                    problem_instances.append(
+                        MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                    )
+                except Exception as e:
+                    print(f"[GRPO] Warning: Failed to load prompt '{smi}'. Fallback to C.")
+                    problem_instances.append(MoleculeDesign.get_c_chains(self.config)[0])
+
+            print(f"[GRPO] Using {len(problem_instances)} custom prompts.")
+
+        elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
             # We want one prompt to always be "C", so we sample N-1 from the library
             # num_prompts_from_lib = self.config.num_prompts_per_epoch
             num_prompts_from_lib = self.config.num_prompts_per_epoch - 1
@@ -201,7 +218,7 @@ class GumbeldoreDataset:
         # Kick off workers
         future_tasks = [
             async_sbs_worker.remote(
-                self.config, job_pool, network_weights, device,
+                self.config, job_pool, network_weights, central_oracle_handle, device,
                 batch_size_gpu if device != "cpu" else batch_size_cpu,
                 cpu_cores[i], best_objective, memory_aggressive
             )
@@ -341,7 +358,7 @@ class GumbeldoreDataset:
 
 
 @ray.remote(max_calls=1)
-def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
+def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, central_oracle_handle,
                      device: str, batch_size: int,
                      cpu_core: Optional[int] = None,
                      best_objective: Optional[float] = None,
@@ -353,6 +370,9 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
     network.eval()
 
     autocast_ctx, _ = _make_autocast_ctx(config) if config.use_amp_inference else (nullcontext(), None)
+
+    # Initialize the Proxy to talk to the Central Oracle Actor
+    objective_evaluator = RemoteEvaluatorProxy(central_oracle_handle)
 
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
         if not all(trajectories):
@@ -490,7 +510,8 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         network.to(network.device)
         network.eval()
 
-        objective_evaluator = MoleculeObjectiveEvaluator(config, torch.device(config.objective_gnn_device))
+        # REMOVED: objective_evaluator = MoleculeObjectiveEvaluator(...)
+        # The worker now strictly uses the RemoteEvaluatorProxy defined above
 
         while True:
             batch = ray.get(job_pool.get_jobs.remote(batch_size))
