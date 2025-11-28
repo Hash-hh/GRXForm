@@ -1,9 +1,115 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import random
 from rdkit import Chem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from rdkit.Chem import DataStructs, AllChem
+from sklearn.ensemble import RandomForestClassifier
+# from sklearn.exceptions import NotFittedError
+
+
+class SurrogateModel:
+    """
+    A lightweight Random Forest Classifier acting as a 'Fake Oracle'.
+    It predicts the probability of a molecule being 'Good' (top percentile).
+    """
+
+    def __init__(self, use_classifier=True, percentile_threshold=80):
+        self.model = RandomForestClassifier(n_estimators=100, n_jobs=1, max_depth=10)
+        self.is_fitted = False
+        self.percentile_threshold = percentile_threshold
+        self.fp_cache = {}  # Simple cache for speed within an epoch
+
+    def _get_fp(self, smiles: str) -> Optional[np.ndarray]:
+        if smiles in self.fp_cache:
+            return self.fp_cache[smiles]
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        # 2048 bits for better resolution
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+        arr = np.zeros((1,), dtype=np.int8)
+        DataStructs.ConvertToNumpyArray(fp, arr)
+        self.fp_cache[smiles] = arr
+        return arr
+
+
+    def train(self, smiles_list: List[str], scores_list: List[float]):
+        """
+        Trains the RF classifier.
+        Labels are created dynamically: 1 if score >= percentile_threshold, else 0.
+        """
+        if not smiles_list:
+            return
+
+        # 1. Prepare Data
+        X = []
+        valid_scores = []
+
+        for smi, score in zip(smiles_list, scores_list):
+            if score == float("-inf") or score is None:
+                continue
+            fp = self._get_fp(smi)
+            if fp is not None:
+                X.append(fp)
+                valid_scores.append(score)
+
+        if len(X) < 50:  # Don't train on too little data
+            print(f"[Surrogate] Not enough data to train yet ({len(X)} samples).")
+            return
+
+        # 2. Define Label Threshold (Dynamic)
+        # E.g., Top 20% of molecules seen so far are "Class 1"
+        threshold = np.percentile(valid_scores, self.percentile_threshold)
+        y = [1 if s >= threshold else 0 for s in valid_scores]
+
+        # 3. Train
+        try:
+            self.model.fit(X, y)
+            self.is_fitted = True
+            acc = self.model.score(X, y)
+            print(f"[Surrogate] Trained on {len(X)} samples. Threshold: {threshold:.3f}. Train Acc: {acc:.3f}")
+        except Exception as e:
+            print(f"[Surrogate] Training failed: {e}")
+            self.is_fitted = False
+
+        # Clear cache after training to save memory
+        self.fp_cache = {}
+
+    def predict_ranking_scores(self, smiles_list: List[str]) -> np.ndarray:
+        """
+        Returns a score for ranking.
+        For Classifier: Returns probability of Class 1 (Good).
+        """
+        if not self.is_fitted:
+            # Fallback: random scores if not trained yet
+            return np.random.rand(len(smiles_list))
+
+        X = []
+        indices_kept = []
+
+        for i, smi in enumerate(smiles_list):
+            fp = self._get_fp(smi)
+            if fp is not None:
+                X.append(fp)
+                indices_kept.append(i)
+
+        if not X:
+            return np.zeros(len(smiles_list))
+
+        # Predict Probabilities (Class 1)
+        # try:
+        probs = self.model.predict_proba(X)[:, 1]
+        # except:
+        #     # Handle edge case where model only learned one class
+        #     probs = np.zeros(len(X))
+
+        # Reconstruct full array matching input length
+        final_scores = np.zeros(len(smiles_list))
+        for idx, p in zip(indices_kept, probs):
+            final_scores[idx] = p
+
+        return final_scores
 
 
 def get_scaffold(smiles: str) -> str:

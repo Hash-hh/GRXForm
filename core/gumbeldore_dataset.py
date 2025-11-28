@@ -135,18 +135,12 @@ class GumbeldoreDataset:
 
     def generate_dataset(self, network_weights: dict, central_oracle_handle, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False,
-                         custom_prompts: Optional[List[str]] = None):
+                         custom_prompts: Optional[List[str]] = None,
+                         surrogate_model: Optional[Any] = None): # --- NEW ARGUMENT ---
         """
         Parameters:
-            network_weights: [dict] Network weights to use for generating data.
-            central_oracle_handle: Ray actor handle for the CentralOracle.
-            memory_aggressive: [bool] If True, IncrementalSBS is performed "memory aggressive" meaning that
-                intermediate states in the search tree are not stored after transitioning from them, only their
-                policies.
-
-        Behavior:
-            - If config.use_dr_grpo is False: returns metrics dict (original behavior).
-            - If config.use_dr_grpo is True: returns a flat List[MoleculeDesign] (raw trajectories) and does NOT call process_results.
+            surrogate_model: An instance of SurrogateModel (from chem_utils) that implements
+                             predict_ranking_scores(smiles_list).
         """
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                           self.gumbeldore_config["batch_size_per_cpu_worker"])
@@ -168,7 +162,6 @@ class GumbeldoreDataset:
 
         elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
             # We want one prompt to always be "C", so we sample N-1 from the library
-            # num_prompts_from_lib = self.config.num_prompts_per_epoch
             num_prompts_from_lib = self.config.num_prompts_per_epoch - 1
             if num_prompts_from_lib > 0:
                 sampled_smiles_list = random.sample(self.fragment_library, num_prompts_from_lib)
@@ -177,10 +170,7 @@ class GumbeldoreDataset:
 
             # Manually add the single Carbon atom as a prompt
             sampled_smiles_list.append("C")
-            # print(f"[GRPO] Sampling {num_prompts_from_lib} fragments")
             print(f"[GRPO] Sampling {num_prompts_from_lib} fragments + 1 'C' atom prompt.")
-
-            # print(sampled_smiles_list)
 
             # Create MoleculeDesign objects from these SMILES
             problem_instances = []
@@ -216,11 +206,13 @@ class GumbeldoreDataset:
             cpu_cores = [affinity[i % len(cpu_cores)] for i in range(len(self.devices_for_workers))]
 
         # Kick off workers
+        # --- PASSING SURROGATE MODEL TO WORKER ---
         future_tasks = [
             async_sbs_worker.remote(
                 self.config, job_pool, network_weights, central_oracle_handle, device,
                 batch_size_gpu if device != "cpu" else batch_size_cpu,
-                cpu_cores[i], best_objective, memory_aggressive
+                cpu_cores[i], best_objective, memory_aggressive,
+                surrogate_model=surrogate_model
             )
             for i, device in enumerate(self.devices_for_workers)
         ]
@@ -260,15 +252,7 @@ class GumbeldoreDataset:
 
             return grouped_designs  # Return the List[List[MoleculeDesign]]
 
-            # flat: List[MoleculeDesign] = []
-            # for lst in results:
-            #     if not lst:
-            #         continue
-            #     flat.extend(lst)
-            # return flat
-
         # Supervised / non-RL: original metrics path
-        # print(self.process_results(problem_instances, results))
         return self.process_results(problem_instances, results)
 
     def process_results(self, problem_instances, results):
@@ -363,6 +347,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
                      cpu_core: Optional[int] = None,
                      best_objective: Optional[float] = None,
                      memory_aggressive: bool = False,
+                     surrogate_model: Optional[Any] = None  # --- NEW ARGUMENT ---
                      ):
     network = MoleculeTransformer(config, device)
     network.load_state_dict(network_weights)
@@ -375,12 +360,6 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
     objective_evaluator = RemoteEvaluatorProxy(central_oracle_handle)
 
     def child_log_probability_fn(trajectories: List[MoleculeDesign]) -> [np.array]:
-        if not all(trajectories):
-            print(f"[DEBUG] child_log_probability_fn received a list containing None.", flush=True)
-            # Print the list for inspection
-            print(f"[DEBUG] Trajectories list: {trajectories}", flush=True)
-        # --- END DEBUG PRINT ---
-
         with autocast_ctx:
             return MoleculeDesign.log_probability_fn(trajectories=trajectories, network=network)
 
@@ -410,85 +389,44 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
 
         return results
 
-        # return [traj.transition_fn(action) for traj, action in trajectory_action_pairs]
-
-    def _sample_diverse_from_sorted(
-            beam_leaves: List[MoleculeDesign], num_keep: int, randomly=False
-    ) -> List[MoleculeDesign]:
+    # --- NEW: Helper for Surrogate Filtering ---
+    def apply_surrogate_filtering_and_evaluate(candidates: List[MoleculeDesign], num_keep: int):
         """
-        Picks items from a list sorted in descending order based on a stratified strategy.
-
-        The strategy is:
-        - 25% from the top (highest objective).
-        - 25% from the bottom (lowest objective within the leaves).
-        - 50% sampled randomly from the middle portion.
-
-        This ensures diversity in the training batch by including top performers,
-        marginal performers, and a random sample of the rest.
-
-        Args:
-            beam_leaves: A list of objects, pre-sorted in descending order by their
-                         objective value.
-            num_keep: The total number of items to select and return.
-
-        Returns:
-            A new list containing the selected items, totaling num_keep.
+        1. If surrogate exists & is fitted, rank candidates by predicted probability.
+        2. Keep top `num_keep`.
+        3. Run Real Oracle (batch_leaf_evaluation_fn) only on the kept ones.
         """
-        if randomly:
-            # just keep the top N molecules and randomly sample the rest
-            N = 10
-            if len(beam_leaves) <= num_keep:
-                return beam_leaves
-            top_samples = beam_leaves[:N]
-            remaining_pool = beam_leaves[N:]
-            remaining_samples = random.sample(remaining_pool, k=num_keep - N)
-            final_selection = top_samples + remaining_samples
-            random.shuffle(final_selection)
-            return final_selection
+        # If no candidates, return empty
+        if not candidates:
+            return []
 
-        total_leaves = len(beam_leaves)
+        # If no surrogate or not fitted, behave like standard random/truncate strategy
+        if surrogate_model is None or not surrogate_model.is_fitted:
+            # Fallback: Just take first N (or shuffle)
+            selected = candidates[:num_keep]
+            batch_leaf_evaluation_fn(selected)
+            return selected
 
-        # --- Edge Case Handling ---
-        # If we don't have enough leaves to sample from, just return them all.
-        if total_leaves <= num_keep:
-            return beam_leaves
+        # 1. Get SMILES
+        smiles_list = [c.smiles_string for c in candidates]
 
-        # --- 1. Calculate the counts for each stratum ---
-        num_top = int(0.25 * num_keep)
-        num_bottom = int(0.25 * num_keep)
-        # The remainder will be sampled from the middle to ensure we get exactly num_keep
-        num_middle = num_keep - num_top - num_bottom
+        # 2. Predict Ranking Scores (Prob of being good)
+        pred_scores = surrogate_model.predict_ranking_scores(smiles_list)
 
-        # --- 2. Select the top samples ---
-        # These are the first `num_top` elements because the list is sorted descendingly.
-        top_samples = beam_leaves[:num_top]
+        # 3. Sort candidates by predicted score (descending)
+        # Zip, sort, unzip
+        paired = zip(candidates, pred_scores)
+        sorted_paired = sorted(paired, key=lambda x: x[1], reverse=True)
 
-        # --- 3. Select the bottom samples ---
-        # These are the last `num_bottom` elements.
-        # Handle the case where num_bottom might be 0.
-        bottom_samples = beam_leaves[-num_bottom:] if num_bottom > 0 else []
+        # 4. Keep Top N
+        kept_paired = sorted_paired[:num_keep]
+        selected_candidates = [p[0] for p in kept_paired]
 
-        # --- 4. Define the middle pool and sample from it ---
-        # The middle pool consists of elements not in the top or bottom sections.
-        middle_pool = beam_leaves[num_top:-num_bottom] if num_bottom > 0 else beam_leaves[num_top:]
+        # 5. Evaluate REAL Oracle on selected
+        # Note: This consumes PMO budget only for the filtered ones!
+        batch_leaf_evaluation_fn(selected_candidates)
 
-        # Ensure we don't try to sample more than available in the pool.
-        # This shouldn't happen with the initial `total_leaves <= num_keep` check,
-        # but it's good practice for robustness.
-        actual_middle_sample_size = min(num_middle, len(middle_pool))
-
-        # Sample randomly without replacement from the middle pool.
-        middle_samples = random.sample(middle_pool, k=actual_middle_sample_size)
-
-        # --- 5. Combine and return the results ---
-        # The final list will have top, a random assortment from the middle, and bottom.
-        final_selection = top_samples + middle_samples + bottom_samples
-
-        # As a final guardrail, shuffle the result so the training process doesn't see
-        # samples in a biased (top-middle-bottom) order.
-        random.shuffle(final_selection)
-
-        return final_selection
+        return selected_candidates
 
     # Silence RDKit warnings
     RDLogger.DisableLog('rdApp.*')
@@ -510,9 +448,6 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
         network.to(network.device)
         network.eval()
 
-        # REMOVED: objective_evaluator = MoleculeObjectiveEvaluator(...)
-        # The worker now strictly uses the RemoteEvaluatorProxy defined above
-
         while True:
             batch = ray.get(job_pool.get_jobs.remote(batch_size))
             if batch is None:
@@ -528,13 +463,18 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
                                                                         child_log_probability_fn,
                                                                         config)
 
-                # Evaluate all generated trajectories
-                all_trajectories = [traj for traj_list in trajectories_by_root for traj in traj_list]
-                if all_trajectories:
-                    batch_leaf_evaluation_fn(all_trajectories)
+                # --- MODIFIED: FILTERING ---
+                # trajectories_by_root is List[List[MoleculeDesign]]
+                # We need to filter each sub-list
+                filtered_results_by_root = []
+                for traj_list in trajectories_by_root:
+                    # Filter down to 'num_trajectories_to_keep'
+                    keep_k = config.gumbeldore_config["num_trajectories_to_keep"]
+                    filtered_list = apply_surrogate_filtering_and_evaluate(traj_list, keep_k)
+                    filtered_results_by_root.append(filtered_list)
 
                 # Group results for pushing back to the job pool
-                results_to_push = [(idx, trajectories) for idx, trajectories in zip(idx_list, trajectories_by_root)]
+                results_to_push = [(idx, trajectories) for idx, trajectories in zip(idx_list, filtered_results_by_root)]
 
             elif config.gumbeldore_config["search_type"] == "beam_search":
                 # Stochastic/deterministic beam search.
@@ -547,17 +487,35 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
                 )
                 results_to_push = []
                 for j, result_idx in enumerate(idx_list):
-                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
-                    #     :config.gumbeldore_config["num_trajectories_to_keep"]]]
-                    result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
-                    if result and result[0].objective is None:
-                        batch_leaf_evaluation_fn(result)
-                    results_to_push.append((result_idx, result))
+                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                    raw_result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+
+                    # --- MODIFIED: FILTERING ---
+                    keep_k = config.gumbeldore_config["num_trajectories_to_keep"]
+
+                    # We have `beam_width` candidates (e.g. 100). We only want to eval top 10.
+                    filtered_result = apply_surrogate_filtering_and_evaluate(raw_result, keep_k)
+
+                    results_to_push.append((result_idx, filtered_result))
 
             else:  # tasar, wor
+
+                # --- NEW LOGIC FOR WOR: Defer Oracle Calls ---
+                if config.gumbeldore_config["search_type"] == "wor":
+                    # WOR calls `batch_leaf_evaluation_fn` internally inside IncrementalSBS.
+                    # To support "Fake Oracle", we replace this with a dummy function that
+                    # returns Zeros and does not set .objective.
+                    # We also must provide a safe sorting key because .objective will be None.
+                    eval_fn_for_sbs = lambda trajs: np.zeros(len(trajs))
+                    leaf_eval_fn_for_sbs = lambda state: (state.objective if state.objective is not None else -float('inf'))
+                else:
+                    # TASAR requires real feedback
+                    eval_fn_for_sbs = batch_leaf_evaluation_fn
+                    leaf_eval_fn_for_sbs = MoleculeDesign.to_max_evaluation_fn
+
                 inc_sbs = IncrementalSBS(root_nodes, child_log_probability_fn, child_transition_fn,
-                                         leaf_evaluation_fn=MoleculeDesign.to_max_evaluation_fn,
-                                         batch_leaf_evaluation_fn=batch_leaf_evaluation_fn,
+                                         leaf_evaluation_fn=leaf_eval_fn_for_sbs,
+                                         batch_leaf_evaluation_fn=eval_fn_for_sbs,
                                          memory_aggressive=False)
 
                 if config.gumbeldore_config["search_type"] == "tasar":
@@ -581,21 +539,23 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
 
                 results_to_push = []
                 for j, result_idx in enumerate(idx_list):
-                    # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
-                    #     :config.gumbeldore_config["num_trajectories_to_keep"]]]
                     if config.gumbeldore_config["search_type"] == "wor":
-                        result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
+                        # WOR typically returns the whole beam (e.g. 100)
+                        raw_result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
                     elif config.gumbeldore_config["search_type"] == "tasar":
-                        # result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j]]
-                        result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
+                        # TASAR slicing kept as is
+                        raw_result: List[MoleculeDesign] = [x.state for x in beam_leaves_batch[j][
                             :config.gumbeldore_config["num_trajectories_to_keep"]]]
-                    # we need to sample a diverse set from the leaves beam_leaves_batch[j] which is already sorted in
-                    # descending order based on objective as expected by _sample_diverse_from_sorted
-                    # result: List[MoleculeDesign] = _sample_diverse_from_sorted(result,
-                    #     config.gumbeldore_config["num_trajectories_to_keep"], randomly=True)
-                    # Check if they need objective evaluation (this will only be true for deterministic beam search
-                    if result and result[0].objective is None:
-                        batch_leaf_evaluation_fn(result)
+
+                    # --- MODIFIED: FILTERING (Corrected for WOR) ---
+                    # Only evaluate if objective is None (which happens if we used the dummy evaluator)
+                    if raw_result and raw_result[0].objective is None:
+                        keep_k = config.gumbeldore_config["num_trajectories_to_keep"]
+                        # Filter down to keep_k and evaluate
+                        result = apply_surrogate_filtering_and_evaluate(raw_result, keep_k)
+                    else:
+                        result = raw_result
+
                     results_to_push.append((result_idx, result))
 
             ray.get(job_pool.push_results.remote(results_to_push))

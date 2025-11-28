@@ -3,7 +3,8 @@ import copy
 import importlib
 import os
 import time
-from typing import Optional, List
+from typing import Optional, List, Dict
+import threading  # <--- Added for background monitoring
 
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LambdaLR
@@ -44,25 +45,10 @@ def train_for_one_epoch_supervised(epoch: int,
     """
     Original supervised fine-tuning path (dataset generation + cross-entropy on heads).
     """
-    # For supervised mode, we assume objective_evaluator is compatible (e.g. RemoteEvaluatorProxy)
-    # But supervised mode typically trains on generated data, so it needs generation logic.
-    # GumbeldoreDataset init requires an evaluator.
-
-    # NOTE: To minimize changes, we initialize GumbeldoreDataset here as before
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
 
-    # Generate dataset expects a handle in the new signature.
-    # Since supervised mode calls generate_dataset, and we updated that signature in gumbeldore_dataset.py:
-    # generate_dataset(self, network_weights, central_oracle_handle, ...)
-    # We need to extract the handle from the proxy if available, or pass the proxy itself if the worker supports it.
-    # However, gumbeldore_dataset.generate_dataset passes 'central_oracle_handle' to 'async_sbs_worker'.
-    # 'async_sbs_worker' then wraps it in 'RemoteEvaluatorProxy'.
-    # Therefore, we need the underlying ACTOR HANDLE here, not the proxy.
-
-    # FIX: We need to pass the actor handle to this function or extract it.
-    # Assuming 'objective_evaluator' passed in is 'evaluator_proxy'.
     actor_handle = objective_evaluator.actor
 
     metrics = gumbeldore_dataset.generate_dataset(
@@ -93,8 +79,6 @@ def train_for_one_epoch_supervised(epoch: int,
 
     # Train for one epoch
     network.train()
-
-    # freeze layers except the last (original behavior)
 
     if config.freeze_all_except_final_layer:
         for parameter in network.parameters():
@@ -164,32 +148,39 @@ def train_for_one_epoch_rl(epoch: int,
                            network: MoleculeTransformer,
                            network_weights: dict,
                            optimizer: torch.optim.Optimizer,
-                           central_oracle_handle,  # CHANGED: Accept actor handle directly
+                           central_oracle_handle,
                            gumbeldore_dataset: GumbeldoreDataset,
                            novelty_memory: Optional[dict] = None,
-                           hall_of_fame: Optional[List[dict]] = None):
+                           hall_of_fame: Optional[List[dict]] = None,
+                           surrogate_model: Optional[chem_utils.SurrogateModel] = None,
+                           surrogate_buffer: Optional[Dict] = None):
     """
-    RL fine-tuning epoch:
-      1. Generate trajectories (terminated molecules) with current policy.
-      2. Run policy gradient update via dr_grpo_update.
-      3. Produce logging artifacts similar in spirit to supervised path.
+    RL fine-tuning epoch with Surrogate Filtering.
     """
     # 1. Pick ONE prompt for this epoch (C or Elite)
-    # We pass it as a list of length 1.
     elite_prompt_prob = config.elite_prompt_prob
     prompt_str = chem_utils.sample_prompt_for_epoch(hall_of_fame, elite_prob=elite_prompt_prob)
 
     print(f"[RL] Epoch {epoch + 1}: Prompt='{prompt_str}'")
 
+    # 2. Check if Surrogate is ready to be used
+    active_surrogate = None
+    if surrogate_model is not None and surrogate_model.is_fitted:
+        print(f"[RL] Using Trained Surrogate Model for filtering.")
+        active_surrogate = surrogate_model
+    else:
+        print(f"[RL] Surrogate not fitted yet. Using standard Random/Beam selection.")
+
     print(f"[RL] Generating trajectories (epoch {epoch + 1})...")
 
-    # CHANGED: Pass central_oracle_handle to generate_dataset
+    # 3. Generate Trajectories (Passing the surrogate!)
     trajectories = gumbeldore_dataset.generate_dataset(
         network_weights=network_weights,
         central_oracle_handle=central_oracle_handle,
         best_objective=None,
         memory_aggressive=False,
-        custom_prompts=[prompt_str]
+        custom_prompts=[prompt_str],
+        surrogate_model=active_surrogate  # <--- Passed here
     )
 
     if not trajectories or not any(trajectories):
@@ -198,14 +189,9 @@ def train_for_one_epoch_rl(epoch: int,
             "num_trajectories": 0,
             "policy_loss": 0.0,
             "baseline": 0.0,
-            "mean_reward": float("-inf"),
-            "best_reward": float("-inf"),
-            "mean_advantage": 0.0,
-            "std_advantage": 0.0,
-            "fraction_pos_adv": 0.0
-        }, ["No molecules"]
+        }, ["No molecules"], [], surrogate_buffer
 
-    # Freeze backbone (match supervised style)
+    # 4. Standard RL Training Setup
     if config.freeze_all_except_final_layer:
         for p in network.parameters():
             p.requires_grad = False
@@ -229,23 +215,35 @@ def train_for_one_epoch_rl(epoch: int,
     print("dr GRPO update done.")
     metrics["best_gen_obj"] = metrics.get("best_objective", float("-inf"))
     metrics["mean_best_gen_obj"] = metrics.get("mean_reward", float("-inf"))
-    metrics.setdefault("loss_level_zero", 0.0)
-    metrics.setdefault("loss_level_one", 0.0)
-    metrics.setdefault("loss_level_two", 0.0)
 
-    # Build top 20 text artifact
+    # 5. Extract Data for Surrogate Training & Logging
     mol_map = {}
-    for group in trajectories:  # <-- NEW: Add nested loop
+    new_surrogate_data_count = 0
+
+    flat_trajectories = []
+    for group in trajectories:
+        flat_trajectories.extend(group)
         for m in group:
             if m.objective is None:
                 continue
-            if not m.smiles_string:  # Good to add this check
+            if not m.smiles_string:
                 continue
+
+            # Logging Top 20
             if m.smiles_string not in mol_map or mol_map[m.smiles_string]["obj"] < m.objective:
                 mol_map[m.smiles_string] = {
                     "smiles": m.smiles_string,
                     "obj": m.objective
                 }
+
+            # --- Update Surrogate Buffer ---
+            if surrogate_buffer is not None:
+                # Only add if valid score
+                if m.objective > float("-inf"):
+                    surrogate_buffer['smiles'].append(m.smiles_string)
+                    surrogate_buffer['scores'].append(float(m.objective))
+                    new_surrogate_data_count += 1
+
     unique_mols = list(mol_map.values())
     unique_mols.sort(key=lambda x: x["obj"], reverse=True)
     top20 = unique_mols[:20]
@@ -256,13 +254,13 @@ def train_for_one_epoch_rl(epoch: int,
     if not top20:
         top_20_text_lines.append("No terminated molecules")
 
-    # 4. Collect raw trajectories for HoF update in main loop
-    # Flatten the group structure
-    flat_trajectories = []
-    for group in trajectories:
-        flat_trajectories.extend(group)
+    # 6. Train Surrogate (for next epoch)
+    if surrogate_model is not None and surrogate_buffer is not None:
+        print(f"[RL] Updating Surrogate with {new_surrogate_data_count} new samples.")
+        # Train on accumulated history
+        surrogate_model.train(surrogate_buffer['smiles'], surrogate_buffer['scores'])
 
-    return metrics, top_20_text_lines, flat_trajectories
+    return metrics, top_20_text_lines, flat_trajectories, surrogate_buffer
 
 
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
@@ -301,6 +299,31 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print(f"Eval ({eval_type}) mean top 20 obj: {metrics[f'{eval_type}_mean_top_20_obj']:.3f}")
 
     return metrics, top_20_mols
+
+
+# --- Background Monitor for TASAR Phase ---
+def monitor_tasar_progress(central_oracle, stop_event, config):
+    """
+    Queries the CentralOracle actor periodically to log progress
+    during blocking TASAR execution.
+    """
+    while not stop_event.is_set():
+        # try:
+        # Retrieve current stats from Actor
+        pmo_auc = ray.get(central_oracle.get_current_pmo_score.remote())
+        current_calls, _ = ray.get(central_oracle.get_budget_status.remote())
+
+        if config.use_wandb and wandb.run is not None:
+            wandb.log({
+                "pmo_auc": pmo_auc,
+                "total_oracle_calls": current_calls
+            })
+        # except Exception as e:
+        #     print(f"[Monitor] Logging failed: {e}")
+
+        # Wait 10 seconds or until stopped
+        if stop_event.wait(10.0):
+            break
 
 
 if __name__ == '__main__':
@@ -463,9 +486,6 @@ if __name__ == '__main__':
     network.to(network.device)
     network.eval()
 
-
-
-
     if config.num_epochs > 0:
         print(f"Starting training for {config.num_epochs} epochs.")
 
@@ -512,12 +532,25 @@ if __name__ == '__main__':
         # Initialize dataset with proxy
         gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=evaluator_proxy)
 
+        # --- SURROGATE INITIALIZATION ---
+        print("Initializing Surrogate Model...")
+        # A Random Forest Classifier that treats the top 20% of data seen as "Good" (Class 1)
+        surrogate_model = chem_utils.SurrogateModel(percentile_threshold=80)
+        # Buffer to store history for training the surrogate
+        surrogate_buffer = {'smiles': [], 'scores': []}
+
         hall_of_fame = []
         max_size_hof = config.max_size_hof
         similarity_threshold_hof = config.similarity_threshold_hof
 
+        # --- PMO / TASAR Logic Variables ---
+        RL_BUDGET_LIMIT = 10  # Stop RL when this many unique calls are made
+        unique_calls_history = []  # Track new unique calls per epoch for plateau detection
+        rl_terminated = False
+
         for epoch in range(config.num_epochs):
             print("------")
+            print("Unique Calls History: ", unique_calls_history)
             network_weights = copy.deepcopy(network.get_weights())
 
             if novelty_memory is not None:
@@ -527,16 +560,50 @@ if __name__ == '__main__':
             current_calls, is_done = ray.get(central_oracle.get_budget_status.remote())
             print(f">> PMO Budget Status: {current_calls}/10000 unique calls.")
 
+            # Hard stop condition (Total Budget)
             if is_done or current_calls >= 10000:
                 print(">> PMO Budget (10,000) Reached. Stopping Training.")
+                rl_terminated = True
+                break
+
+            # RL Phase Stop Condition (7500 Limit)
+            if current_calls >= RL_BUDGET_LIMIT:
+                print(f">> RL Budget ({RL_BUDGET_LIMIT}) Reached. Switching to TASAR for inference.")
+                rl_terminated = True
+                break
+
+            # Plateau Check: Has RL found enough NEW molecules recently?
+            if len(unique_calls_history) >= 10:
+                recent_new_calls = sum(unique_calls_history[-10:])
+                threshold = config.gumbeldore_config["num_trajectories_to_keep"]  # e.g. 10
+                if recent_new_calls < threshold:
+                    print(
+                        f">> RL Plateaued ({recent_new_calls} new calls in last 10 epochs). Switching to TASAR for inference.")
+                    rl_terminated = True
+                    break
+
+            if rl_terminated:
                 break
 
             if rl_mode_active:
-                generated_loggable_dict, top20_text, raw_trajectories = train_for_one_epoch_rl(
+                # Capture start calls to calc delta
+                calls_before_epoch = current_calls
+
+                generated_loggable_dict, top20_text, raw_trajectories, surrogate_buffer = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, central_oracle, gumbeldore_dset,
                     novelty_memory=novelty_memory,
-                    hall_of_fame=hall_of_fame
+                    hall_of_fame=hall_of_fame,
+                    surrogate_model=surrogate_model,  # <---
+                    surrogate_buffer=surrogate_buffer  # <---
                 )
+
+
+
+                # Calculate Delta for Plateau Detection
+                calls_after_epoch, _ = ray.get(central_oracle.get_budget_status.remote())
+                new_calls_this_epoch = calls_after_epoch - calls_before_epoch
+                unique_calls_history.append(new_calls_this_epoch)
+
                 # --- UPDATE HALL OF FAME ---
                 candidates = []
                 for mol in raw_trajectories:
@@ -548,12 +615,17 @@ if __name__ == '__main__':
                         })
 
                 hall_of_fame = chem_utils.update_hall_of_fame(hall_of_fame, candidates, max_size=max_size_hof,
-                                                                similarity_threshold=similarity_threshold_hof)
+                                                              similarity_threshold=similarity_threshold_hof)
 
                 if len(hall_of_fame) > 0:
                     print(f"     [HoF] Size: {len(hall_of_fame)} | Best: {hall_of_fame[0]['obj']:.4f}")
                 # The last return value (the buffer data) is not needed in the main loop, so we use _
                 val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
+
+                current_pmo_auc = ray.get(central_oracle.get_current_pmo_score.remote())
+                generated_loggable_dict["pmo_auc"] = current_pmo_auc  # Add to metrics dict
+
+                print(generated_loggable_dict)
 
             else:  # Original Supervised-only mode
                 generated_loggable_dict, top20_text = train_for_one_epoch_supervised(
@@ -599,13 +671,15 @@ if __name__ == '__main__':
                     'mean_current_obj': generated_loggable_dict.get('mean_best_gen_obj'),
                     'worst_current_obj': generated_loggable_dict.get('worst_gen_obj'),
                     "mean_top_20_all_time_obj": generated_loggable_dict.get("mean_top_20_obj"),
-                    "learning_rate": scheduler.get_last_lr()[0]
+                    "learning_rate": scheduler.get_last_lr()[0],
+                    "total_oracle_calls": current_calls,  # Add call logging
                 }
                 # Add specific RL metrics if in RL mode
                 if rl_mode_active:
                     # Define the specific list of metrics you want to log from the RL update
                     keys_to_log = [
                         'baseline',
+                        'pmo_auc',
                         'mean_reward',
                         'best_reward',
                         # 'best_objective',
@@ -641,6 +715,83 @@ if __name__ == '__main__':
                 print("Time exceeded. Stopping training.")
                 break
 
+        # --- END OF TRAINING LOOP ---
+
+        # --- TASAR INFERENCE PHASE ---
+        current_calls, is_done = ray.get(central_oracle.get_budget_status.remote())
+        print("current calls: ", current_calls)
+        if not is_done and current_calls < 10000:
+            print(">> Starting TASAR Inference Phase...")
+
+            # 1. Configure for Search
+            config.gumbeldore_config["search_type"] = "tasar"
+            config.gumbeldore_config["replan_steps"] = 12
+            config.gumbeldore_config["beam_width"] = 256  # Wider search
+
+            # 2. Use Default Prompt (Start from scratch)
+            # Setting custom_prompts=None forces fallback to config defaults (e.g. C-chains)
+            print(f"   TASAR Starting Prompt: Default (Start from scratch/C)")
+
+            # 3. Run TASAR via Dataset (Wrapped with Monitor)
+            # Start Background Monitor Thread
+            stop_monitoring = threading.Event()
+            monitor_thread = threading.Thread(
+                target=monitor_tasar_progress,
+                args=(central_oracle, stop_monitoring, config)
+            )
+            monitor_thread.start()
+
+            try:
+                tasar_trajectories = gumbeldore_dset.generate_dataset(
+                    network_weights=network_weights,  # Use final weights
+                    central_oracle_handle=central_oracle,
+                    best_objective=None,
+                    memory_aggressive=False,
+                    custom_prompts=None,  # Forces standard initialization
+                    surrogate_model=surrogate_model
+                )
+                print(">> TASAR Inference Completed.")
+
+                # --- Calculate & Print Metrics ---
+
+                # The CentralOracle holds the complete history (RL + TASAR)
+                current_pmo_auc = ray.get(central_oracle.get_current_pmo_score.remote())
+                final_calls, _ = ray.get(central_oracle.get_budget_status.remote())
+
+                print(f"   [Final Result] Total Oracle Calls: {final_calls}")
+                print(f"   [Final Result] Combined PMO AUC:   {current_pmo_auc:.4f}")
+
+                all_mols = []
+                for group in tasar_trajectories:
+                    all_mols.extend(group)
+
+                valid_scores = [m.objective for m in all_mols if
+                                m.objective is not None and m.objective > float("-inf")]
+
+                if valid_scores:
+                    best_score = max(valid_scores)
+                    avg_score = sum(valid_scores) / len(valid_scores)
+
+                    valid_scores.sort(reverse=True)
+                    top10 = valid_scores[:10]
+                    top10_avg = sum(top10) / len(top10)
+
+                    print(f"   [TASAR Stats] Generated: {len(all_mols)} | Valid: {len(valid_scores)}")
+                    print(f"   [TASAR Stats] Best Score: {best_score:.4f}")
+                    print(f"   [TASAR Stats] Mean Score: {avg_score:.4f}")
+                    print(f"   [TASAR Stats] Top-10 Mean: {top10_avg:.4f}")
+                else:
+                    print("   [TASAR Stats] No valid molecules found.")
+            except Exception as e:
+                print(f"   TASAR interrupted or failed: {e}")
+            finally:
+                # Ensure monitor stops even on crash
+                stop_monitoring.set()
+                monitor_thread.join()
+
+        else:
+            print(">> Skipping TASAR (Budget exhausted).")
+
     elif config.num_epochs == 0:
         print(f"Testing with loaded model.")
     else:
@@ -655,25 +806,16 @@ if __name__ == '__main__':
     if checkpoint["model_weights"] is None and config.num_epochs == 0:
         print("WARNING! No training performed and no checkpoint loaded. Evaluating random model.")
 
-
-
-    print("Initializing Central Oracle Actor...")
-    central_oracle = CentralOracle.remote(config)
-
-    # Create a local proxy to pass around (keeps interface clean)
-    evaluator_proxy = RemoteEvaluatorProxy(central_oracle)
-
-
-
     torch.cuda.empty_cache()
-    with torch.no_grad():
-        test_loggable_dict, test_text_to_save = evaluate('test', config, network, evaluator_proxy)
-    print(">> TEST")
-    print(test_loggable_dict)
-    logger.log_metrics(test_loggable_dict, step=0, step_desc="test")
-    print(test_text_to_save)
-    logger.text_artifact(os.path.join(config.results_path, "test_top_20_molecules.txt"),
-                         test_text_to_save)
+
+    # with torch.no_grad():
+    #     test_loggable_dict, test_text_to_save = evaluate('test', config, network, evaluator_proxy)
+    # print(">> TEST")
+    # print(test_loggable_dict)
+    # logger.log_metrics(test_loggable_dict, step=0, step_desc="test")
+    # print(test_text_to_save)
+    # logger.text_artifact(os.path.join(config.results_path, "test_top_20_molecules.txt"),
+    #                      test_text_to_save)
 
     # WanB finish
     if hasattr(config, 'use_wandb') and config.use_wandb:

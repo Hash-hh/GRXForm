@@ -72,19 +72,20 @@ class MoleculeConfig:
         # 'drd2', 'gsk3b', 'jnk3', 'qed'
         # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
         # 'deco_hop', 'scaffold_hop'
-        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         # self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        self.load_checkpoint_from_path = "model/wor_10_rl.pt"  # If given, model checkpoint is loaded from this path.
-        # self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = "model/wor_10_rl.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        # self.load_checkpoint_from_path = "model/model_z_chembl.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
@@ -92,7 +93,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 1  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 0  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 2000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -122,7 +123,7 @@ class MoleculeConfig:
         # Self-improvement sequence decoding
         self.gumbeldore_config = {
             # Number of trajectories with the highest objective function evaluation to keep for training
-            "num_trajectories_to_keep": 100,
+            "num_trajectories_to_keep": 10,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cuda:0"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
@@ -131,12 +132,12 @@ class MoleculeConfig:
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
 
-            "search_type": "tasar",  # "beam_search" | "tasar" | "iid_mc", "wor"
+            "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 256,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 256,
+            "beam_width": 128,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -164,7 +165,7 @@ class MoleculeConfig:
         self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_1_group_wor_10_samples"
+        self.wandb_run_name = f"{self.objective_type}_1_group_wor_512_10_samples_chembl"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
@@ -192,8 +193,8 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        # self.rl_entropy_beta = 0.
-        self.rl_entropy_beta = 0.001
+        self.rl_entropy_beta = 0.
+        # self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
