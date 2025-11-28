@@ -308,18 +308,18 @@ def monitor_tasar_progress(central_oracle, stop_event, config):
     during blocking TASAR execution.
     """
     while not stop_event.is_set():
-        # try:
-        # Retrieve current stats from Actor
-        pmo_auc = ray.get(central_oracle.get_current_pmo_score.remote())
-        current_calls, _ = ray.get(central_oracle.get_budget_status.remote())
+        try:
+            # Retrieve current stats from Actor
+            pmo_auc = ray.get(central_oracle.get_current_pmo_score.remote())
+            current_calls, _ = ray.get(central_oracle.get_budget_status.remote())
 
-        if config.use_wandb and wandb.run is not None:
-            wandb.log({
-                "pmo_auc": pmo_auc,
-                "total_oracle_calls": current_calls
-            })
-        # except Exception as e:
-        #     print(f"[Monitor] Logging failed: {e}")
+            if config.use_wandb and wandb.run is not None:
+                wandb.log({
+                    "pmo_auc": pmo_auc,
+                    "total_oracle_calls": current_calls
+                })
+        except Exception as e:
+            print(f"[Monitor] Logging failed: {e}")
 
         # Wait 10 seconds or until stopped
         if stop_event.wait(10.0):
@@ -544,7 +544,7 @@ if __name__ == '__main__':
         similarity_threshold_hof = config.similarity_threshold_hof
 
         # --- PMO / TASAR Logic Variables ---
-        RL_BUDGET_LIMIT = 10  # Stop RL when this many unique calls are made
+        RL_BUDGET_LIMIT = 7500 # Stop RL when this many unique calls are made
         unique_calls_history = []  # Track new unique calls per epoch for plateau detection
         rl_terminated = False
 

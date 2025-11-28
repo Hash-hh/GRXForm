@@ -45,14 +45,18 @@ class SurrogateModel:
         # 1. Prepare Data
         X = []
         valid_scores = []
+        seen_smiles = set()
 
         for smi, score in zip(smiles_list, scores_list):
             if score == float("-inf") or score is None:
+                continue
+            if smi in seen_smiles:
                 continue
             fp = self._get_fp(smi)
             if fp is not None:
                 X.append(fp)
                 valid_scores.append(score)
+                seen_smiles.add(smi)
 
         if len(X) < 50:  # Don't train on too little data
             print(f"[Surrogate] Not enough data to train yet ({len(X)} samples).")
