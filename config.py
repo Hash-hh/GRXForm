@@ -72,8 +72,8 @@ class MoleculeConfig:
         # 'drd2', 'gsk3b', 'jnk3', 'qed'
         # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
         # 'deco_hop', 'scaffold_hop'
-        # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "valsartan_SMARTS"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
@@ -83,7 +83,6 @@ class MoleculeConfig:
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
 
         # Loading trained checkpoints to resume training or evaluate
-        # self.load_checkpoint_from_path = "model/wor_10_rl.pt"  # If given, model checkpoint is loaded from this path.
         self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = "model/model_z_chembl.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
@@ -154,18 +153,21 @@ class MoleculeConfig:
         }
 
         # Results and logging
-        self.results_path = os.path.join("./results",
-                                         datetime.datetime.now().strftime(
-                                             "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        # self.results_path = os.path.join("./results",
+        #                                  datetime.datetime.now().strftime(
+        #                                      "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+
+        self.results_path = "./results/" + self.objective_type + "_" + datetime.datetime.now().strftime(
+                                             "%Y-%m-%d--%H-%M-%S")
 
         self.log_to_file = True
 
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_1_group_wor_128_10_samples_chembl"
+        self.wandb_run_name = f"{self.objective_type}_1_group_wor_128_10_samples_chembl_2"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 

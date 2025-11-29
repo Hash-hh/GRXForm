@@ -572,15 +572,21 @@ if __name__ == '__main__':
                 rl_terminated = True
                 break
 
+            surrogate_active = True
+
             # Plateau Check: Has RL found enough NEW molecules recently?
-            if len(unique_calls_history) >= 10:
-                recent_new_calls = sum(unique_calls_history[-10:])
+            if len(unique_calls_history) >= 50:
+                recent_new_calls = sum(unique_calls_history[-50:])
                 threshold = config.gumbeldore_config["num_trajectories_to_keep"]  # e.g. 10
                 if recent_new_calls < threshold:
                     print(
-                        f">> RL Plateaued ({recent_new_calls} new calls in last 10 epochs). Switching to TASAR for inference.")
-                    rl_terminated = True
-                    break
+                        f">> Surrogate Blocking Detected ({recent_new_calls} unique in last 50). Disabling Surrogate.")
+                    surrogate_active = False
+                # if recent_new_calls < threshold:
+                #     print(
+                #         f">> RL Plateaued ({recent_new_calls} new calls in last 100 epochs). Switching to TASAR for inference.")
+                #     rl_terminated = True
+                #     break
 
             if rl_terminated:
                 break
@@ -589,11 +595,15 @@ if __name__ == '__main__':
                 # Capture start calls to calc delta
                 calls_before_epoch = current_calls
 
+                # Pass surrogate_model ONLY if surrogate_active is True
+                # Otherwise pass None to force random/beam selection
+                model_to_pass = surrogate_model if surrogate_active else None
+
                 generated_loggable_dict, top20_text, raw_trajectories, surrogate_buffer = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, central_oracle, gumbeldore_dset,
                     novelty_memory=novelty_memory,
                     hall_of_fame=hall_of_fame,
-                    surrogate_model=surrogate_model,  # <---
+                    surrogate_model=model_to_pass,  # <---
                     surrogate_buffer=surrogate_buffer  # <---
                 )
 
