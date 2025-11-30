@@ -153,7 +153,8 @@ def train_for_one_epoch_rl(epoch: int,
                            novelty_memory: Optional[dict] = None,
                            hall_of_fame: Optional[List[dict]] = None,
                            surrogate_model: Optional[chem_utils.SurrogateModel] = None,
-                           surrogate_buffer: Optional[Dict] = None):
+                           surrogate_buffer: Optional[Dict] = None,
+                           surrogate_active: bool = False):
     """
     RL fine-tuning epoch with Surrogate Filtering.
     """
@@ -165,7 +166,7 @@ def train_for_one_epoch_rl(epoch: int,
 
     # 2. Check if Surrogate is ready to be used
     active_surrogate = None
-    if surrogate_model is not None and surrogate_model.is_fitted:
+    if surrogate_model is not None and surrogate_active and surrogate_model.is_fitted:
         print(f"[RL] Using Trained Surrogate Model for filtering.")
         active_surrogate = surrogate_model
     else:
@@ -180,7 +181,8 @@ def train_for_one_epoch_rl(epoch: int,
         best_objective=None,
         memory_aggressive=False,
         custom_prompts=[prompt_str],
-        surrogate_model=active_surrogate  # <--- Passed here
+        surrogate_model=active_surrogate,
+        surrogate_active=surrogate_active # <--- Passed here
     )
 
     if not trajectories or not any(trajectories):
@@ -547,6 +549,12 @@ if __name__ == '__main__':
         RL_BUDGET_LIMIT = 7500 # Stop RL when this many unique calls are made
         unique_calls_history = []  # Track new unique calls per epoch for plateau detection
         rl_terminated = False
+        surrogate_active = True
+
+        # Patience tracking
+        best_pmo_auc = 0.0
+        patience_counter = 0
+        PATIENCE_LIMIT = 500  # Stop if no AUC gain in 500 epochs
 
         for epoch in range(config.num_epochs):
             print("------")
@@ -572,16 +580,162 @@ if __name__ == '__main__':
                 rl_terminated = True
                 break
 
-            surrogate_active = True
-
             # Plateau Check: Has RL found enough NEW molecules recently?
-            if len(unique_calls_history) >= 50:
-                recent_new_calls = sum(unique_calls_history[-50:])
-                threshold = config.gumbeldore_config["num_trajectories_to_keep"]  # e.g. 10
+            if len(unique_calls_history) >= 10:
+                recent_new_calls = sum(unique_calls_history[-10:])
+                threshold = 1  # Check for fewer than 1 unique in last 10 epochs
+
                 if recent_new_calls < threshold:
                     print(
-                        f">> Surrogate Blocking Detected ({recent_new_calls} unique in last 50). Disabling Surrogate.")
-                    surrogate_active = False
+                        f">> Stalling detected: ({recent_new_calls} unique in last 10 epochs). Adjusting strategy.")
+
+                    # 1. Get Current Settings
+                    current_keep = config.gumbeldore_config["num_trajectories_to_keep"]
+                    is_wor = (config.gumbeldore_config["search_type"] == "wor")
+                    current_gen = int(config.gumbeldore_config["beam_width"]/4) if is_wor else int(config.gumbeldore_config[
+                        "num_samples_per_instance"]/4)
+
+                    # Calculate the next proposed step (doubling the filter)
+                    next_keep_proposal = current_keep * 2
+
+                    # 2. Decide Strategy based on Surrogate State
+                    if surrogate_active:
+                        # Case A: We can still widen the filter without exceeding generation size
+                        if next_keep_proposal < current_gen:
+                            config.gumbeldore_config["num_trajectories_to_keep"] = next_keep_proposal
+                            print(f">> Widening Filter: Keeping top {next_keep_proposal} (Gen size: {current_gen})")
+
+                        # Case B: Filter is saturated (would equal or exceed generation size)
+                        else:
+                            # new_gen = current_gen * 2
+                            if is_wor:
+                                config.gumbeldore_config["beam_width"] = 32
+                            else:
+                                config.gumbeldore_config["num_samples_per_instance"] = 32
+
+                            surrogate_active = False
+                            print(
+                                f">> Filter Saturated (Next {next_keep_proposal} >= Gen {current_gen}). Disabling Surrogate and setting num samples to 32.")
+                        unique_calls_history = []
+                    else:
+                        # Case C: Surrogate is already off, and we are still stalling
+                        print(
+                            f">> Stalling detected ({recent_new_calls} unique in last 10 epochs). Increasing Entropy.")
+
+                        # increase entropy to force exploration
+                        current_rl_entropy_beta = config.rl_entropy_beta
+                        if current_rl_entropy_beta < 0.001: # Increase to a max of 0.001
+                            config.rl_entropy_beta = current_rl_entropy_beta + 0.00025
+                        else:
+                            # We have still stalled despite a high entropy bonus, it's time to terminate RL
+                            print(f">> High Entropy ({current_rl_entropy_beta:.4f}) insufficient to resolve stalling. Switching to TASAR for inference.")
+                            rl_terminated = True
+
+                        print(f">> New Entropy Beta: {config.rl_entropy_beta:.4f}")
+                        # Reset history to give the new entropy setting time to work
+                        unique_calls_history = []
+
+            # # Plateau Check: Has RL found enough NEW molecules recently?
+            # if len(unique_calls_history) >= 10:
+            #     recent_new_calls = sum(unique_calls_history[-10:])
+            #     threshold = 1
+            #
+            #     if recent_new_calls < threshold:
+            #         print(
+            #             f">> Stalling detected ({recent_new_calls} unique in last 10 epochs). Shifting to TASAR for inference.")
+            #         rl_terminated = True
+
+
+            # # Plateau Check: Has RL found enough NEW molecules recently?
+            # if len(unique_calls_history) >= 10:
+            #     recent_new_calls = sum(unique_calls_history[-10:])
+            #     threshold = 10
+            #
+            #     if recent_new_calls < threshold:
+            #         print(
+            #             f">> Stalling detected ({recent_new_calls} unique in last 10 epochs). Increasing Entropy.")
+            #
+            #         # increase entropy to force exploration
+            #         current_rl_entropy_beta = config.rl_entropy_beta
+            #         if current_rl_entropy_beta < 0.002: # Increase to a max of 0.002
+            #             config.rl_entropy_beta = current_rl_entropy_beta + 0.0005
+            #         else:
+            #             # We have still stalled despite a high entropy bonus, it's time to terminate RL
+            #             print(f">> High Entropy ({current_rl_entropy_beta:.4f}) insufficient to resolve stalling. Switching to TASAR for inference.")
+            #             rl_terminated = True
+            #             break
+            #
+            #         print(f">> New Entropy Beta: {config.rl_entropy_beta:.4f}")
+            #         # Reset history to give the new entropy setting time to work
+            #         unique_calls_history = []
+
+            # # Plateau Check: Has RL found enough NEW molecules recently?
+            # if len(unique_calls_history) >= 10:
+            #     recent_new_calls = sum(unique_calls_history[-10:])
+            #     threshold = 10  # Check for fewer than 10 unique in last 10 epochs
+            #
+            #     if recent_new_calls < threshold:
+            #         print(
+            #             f">> Stalling detected: ({recent_new_calls} unique in last 10 epochs). Adjusting strategy.")
+            #
+            #         # 1. Get Current Settings
+            #         current_keep = config.gumbeldore_config["num_trajectories_to_keep"]
+            #         is_wor = (config.gumbeldore_config["search_type"] == "wor")
+            #         current_gen = config.gumbeldore_config["beam_width"] if is_wor else config.gumbeldore_config[
+            #             "num_samples_per_instance"]
+            #
+            #         # Calculate the next proposed step (doubling the filter)
+            #         next_keep_proposal = current_keep * 2
+            #
+            #         # 2. Decide Strategy based on Surrogate State
+            #         if surrogate_active:
+            #             # Case A: We can still widen the filter without exceeding generation size
+            #             if next_keep_proposal < current_gen:
+            #                 config.gumbeldore_config["num_trajectories_to_keep"] = next_keep_proposal
+            #                 print(f">> Widening Filter: Keeping top {next_keep_proposal} (Gen size: {current_gen})")
+            #
+            #             # Case B: Filter is saturated (would equal or exceed generation size)
+            #             else:
+            #                 new_gen = current_gen * 2
+            #                 if is_wor:
+            #                     config.gumbeldore_config["beam_width"] = new_gen
+            #                 else:
+            #                     config.gumbeldore_config["num_samples_per_instance"] = new_gen
+            #
+            #                 surrogate_active = False
+            #                 print(
+            #                     f">> Filter Saturated (Next {next_keep_proposal} >= Gen {current_gen}). Disabling Surrogate & Doubling Gen to {new_gen}.")
+            #
+            #         else:
+            #             # Case C: Surrogate is already off, and we are still stalling
+            #             new_gen = current_gen * 2
+            #             if is_wor:
+            #                 config.gumbeldore_config["beam_width"] = new_gen
+            #             else:
+            #                 config.gumbeldore_config["num_samples_per_instance"] = new_gen
+            #             print(f">> Direct Mode Stalling. Doubling Gen to {new_gen} to force exploration.")
+            #
+            #         # Reset history to allow the new strategy time to work
+            #         unique_calls_history = []
+
+            # # Plateau Check: Has RL found enough NEW molecules recently?
+            # if len(unique_calls_history) >= 25:
+            #     recent_new_calls = sum(unique_calls_history[-25:])
+            #     threshold = config.gumbeldore_config["num_trajectories_to_keep"]  # e.g. 10
+            #     if recent_new_calls < threshold:
+            #         print(
+            #             f">> Detected only ({recent_new_calls} unique in last 25). Disabling Surrogate.")
+            #         if surrogate_active:
+            #             surrogate_active = False
+            #         else:
+            #             # Increase beam width to encourage more exploration
+            #             if config.gumbeldore_config["search_type"] == "wor":
+            #                 current_beam_width = config.gumbeldore_config["beam_width"]
+            #                 config.gumbeldore_config["beam_width"] = current_beam_width * 2
+            #             elif config.gumbeldore_config["search_type"] == "iid_mc":
+            #                 current_num_samples = config.gumbeldore_config["num_samples_per_instance"]
+            #                 config.gumbeldore_config["num_samples_per_instance"] = current_num_samples * 2
+
                 # if recent_new_calls < threshold:
                 #     print(
                 #         f">> RL Plateaued ({recent_new_calls} new calls in last 100 epochs). Switching to TASAR for inference.")
@@ -604,10 +758,9 @@ if __name__ == '__main__':
                     novelty_memory=novelty_memory,
                     hall_of_fame=hall_of_fame,
                     surrogate_model=model_to_pass,  # <---
-                    surrogate_buffer=surrogate_buffer  # <---
+                    surrogate_buffer=surrogate_buffer,
+                    surrogate_active=surrogate_active# <---
                 )
-
-
 
                 # Calculate Delta for Plateau Detection
                 calls_after_epoch, _ = ray.get(central_oracle.get_budget_status.remote())
@@ -633,6 +786,21 @@ if __name__ == '__main__':
                 val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
 
                 current_pmo_auc = ray.get(central_oracle.get_current_pmo_score.remote())
+
+                # --- Patience Check ---
+                if current_pmo_auc > best_pmo_auc + 0.0001:  # Use a tiny epsilon
+                    best_pmo_auc = current_pmo_auc
+                    patience_counter = 0  # Reset
+                else:
+                    patience_counter += 1
+                    print(f"     [Patience] No AUC improvement for {patience_counter}/{PATIENCE_LIMIT} epochs.")
+
+                    if patience_counter >= PATIENCE_LIMIT:
+                        print(f">> RL Stalled (AUC stuck at {best_pmo_auc:.4f}). Switching to TASAR.")
+                        rl_terminated = True
+                        # We don't break immediately here to allow logging this epoch's stats.
+                        # The check at the TOP of the next loop will handle the break.
+
                 generated_loggable_dict["pmo_auc"] = current_pmo_auc  # Add to metrics dict
 
                 print(generated_loggable_dict)
@@ -709,10 +877,10 @@ if __name__ == '__main__':
                 wandb.log(wandb_log)
 
             if rl_mode_active:
-                logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"),
+                logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_10_molecules.txt"),
                                      "\n".join(top20_text))
             else:
-                logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_20_molecules.txt"),
+                logger.text_artifact(os.path.join(config.results_path, f"epoch_{epoch + 1}_train_top_10_molecules.txt"),
                                      top20_text)
 
             # Update and save the 'last' model checkpoint
@@ -737,6 +905,7 @@ if __name__ == '__main__':
             config.gumbeldore_config["search_type"] = "tasar"
             config.gumbeldore_config["replan_steps"] = 12
             config.gumbeldore_config["beam_width"] = 256  # Wider search
+            config.gumbeldore_config["num_trajectories_to_keep"] = 10
 
             # 2. Use Default Prompt (Start from scratch)
             # Setting custom_prompts=None forces fallback to config defaults (e.g. C-chains)

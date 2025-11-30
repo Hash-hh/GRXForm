@@ -170,19 +170,12 @@ class CentralOracle:
         - Checks Cache (De-duplication).
         - Checks Budget.
         - Logs EVERY new evaluation to history.
-        - Logs Top-10 updates to tracker IMMEDIATELY when they happen.
+        - For PMO benchmark: Logs Top-10 updates every 100 unique calls.
         """
         results = []
         cache_updated = False
 
-        # Get the current threshold for entry into the Top 10
-        # If we have fewer than 10, threshold is -inf (anything gets in)
-        # If we have 10+, threshold is the 10th best score.
-        if len(self.all_valid_molecules) < 10:
-            top10_threshold = float("-inf")
-        else:
-            # List is sorted descending, so index 9 is the 10th best
-            top10_threshold = self.all_valid_molecules[min(len(self.all_valid_molecules), 10) - 1][0]
+        # [REMOVED] top10_threshold initialization logic is no longer needed.
 
         for smi in smiles_list:
             # 1. Validation
@@ -213,40 +206,27 @@ class CentralOracle:
                 continue
 
             # 4. Oracle Call (The Expensive Part)
-            # try:
             score = self.oracle(canon_smi)
-            # except:
-            #     score = float("-inf")
 
             # 5. Update State
             self.global_cache[canon_smi] = score
-            self.unique_calls += 1
+            self.unique_calls += 1  # Increments on unique calls only
 
-            # 6. Log this specific molecule
-            # Immediate append to history file
+            # 6. Log this specific molecule (Raw History)
             with open(self.history_file_path, "a") as f:
                 f.write(f"{self.unique_calls}\t{canon_smi}\t{score}\n")
 
             results.append(score)
-
             cache_updated = True
+
+            # Maintain the pool of valid molecules for the Top-10 calculation
             if score > float("-inf"):
-                # Add to list
                 self.all_valid_molecules.append((score, canon_smi))
 
-                # --- FINE-GRAINED LOGGING ---
-                # If this new molecule beats the threshold, we log immediately.
-                # This ensures we capture the EXACT call ID where the improvement happened.
-                if score > top10_threshold:
-                    # Re-sort and update
-                    self._update_top10_tracker()
-
-                    # Update local threshold variable for the next iteration of this loop
-                    # (because all_valid_molecules changed)
-                    if len(self.all_valid_molecules) < 10:
-                        top10_threshold = float("-inf")
-                    else:
-                        top10_threshold = self.all_valid_molecules[min(len(self.all_valid_molecules), 10) - 1][0]
+            # Update the AUC tracker exactly every 100 UNIQUE oracle calls.
+            # This aligns with the 'freq=100' logic in the benchmark code.
+            if self.unique_calls % 100 == 0:
+                self._update_top10_tracker()
 
         # Save cache if any new call was made (persistence)
         if cache_updated:

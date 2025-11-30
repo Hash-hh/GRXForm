@@ -136,7 +136,8 @@ class GumbeldoreDataset:
     def generate_dataset(self, network_weights: dict, central_oracle_handle, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False,
                          custom_prompts: Optional[List[str]] = None,
-                         surrogate_model: Optional[Any] = None): # --- NEW ARGUMENT ---
+                         surrogate_model: Optional[Any] = None,
+                         surrogate_active: bool = False): # --- NEW ARGUMENT ---
         """
         Parameters:
             surrogate_model: An instance of SurrogateModel (from chem_utils) that implements
@@ -212,7 +213,7 @@ class GumbeldoreDataset:
                 self.config, job_pool, network_weights, central_oracle_handle, device,
                 batch_size_gpu if device != "cpu" else batch_size_cpu,
                 cpu_cores[i], best_objective, memory_aggressive,
-                surrogate_model=surrogate_model
+                surrogate_model=surrogate_model, surrogate_active=surrogate_active
             )
             for i, device in enumerate(self.devices_for_workers)
         ]
@@ -347,7 +348,8 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
                      cpu_core: Optional[int] = None,
                      best_objective: Optional[float] = None,
                      memory_aggressive: bool = False,
-                     surrogate_model: Optional[Any] = None  # --- NEW ARGUMENT ---
+                     surrogate_model: Optional[Any] = None,
+                     surrogate_active: bool = False
                      ):
     network = MoleculeTransformer(config, device)
     network.load_state_dict(network_weights)
@@ -401,11 +403,15 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
             return []
 
         # If no surrogate or not fitted, behave like standard random/truncate strategy
-        if surrogate_model is None or not surrogate_model.is_fitted:
+        if (surrogate_model is None or not surrogate_model.is_fitted) and surrogate_active:
             # Fallback: Just take first N (or shuffle)
             selected = candidates[:num_keep]
             batch_leaf_evaluation_fn(selected)
             return selected
+        if not surrogate_active:
+            # Surrogate inactive: behave normally (evaluate full beam)
+            batch_leaf_evaluation_fn(candidates)
+            return candidates
 
         # 1. Get SMILES
         smiles_list = [c.smiles_string for c in candidates]
