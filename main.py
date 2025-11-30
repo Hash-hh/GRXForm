@@ -554,7 +554,7 @@ if __name__ == '__main__':
         # Patience tracking
         best_pmo_auc = 0.0
         patience_counter = 0
-        PATIENCE_LIMIT = 100  # Stop if no AUC gain in 100 epochs
+        PATIENCE_LIMIT = 5000  # Stop if no AUC gain in 100 epochs
 
         for epoch in range(config.num_epochs):
             print("------")
@@ -592,8 +592,8 @@ if __name__ == '__main__':
                     # 1. Get Current Settings
                     current_keep = config.gumbeldore_config["num_trajectories_to_keep"]
                     is_wor = (config.gumbeldore_config["search_type"] == "wor")
-                    current_gen = int(config.gumbeldore_config["beam_width"]/4) if is_wor else int(config.gumbeldore_config[
-                        "num_samples_per_instance"]/4)
+                    current_gen = config.gumbeldore_config["beam_width"] if is_wor else config.gumbeldore_config[
+                        "num_samples_per_instance"]
 
                     # Calculate the next proposed step (doubling the filter)
                     next_keep_proposal = current_keep * 2
@@ -608,11 +608,6 @@ if __name__ == '__main__':
                         # Case B: Filter is saturated (would equal or exceed generation size)
                         else:
                             # new_gen = current_gen * 2
-                            if is_wor:
-                                config.gumbeldore_config["beam_width"] = 32
-                            else:
-                                config.gumbeldore_config["num_samples_per_instance"] = 32
-
                             surrogate_active = False
                             print(
                                 f">> Filter Saturated (Next {next_keep_proposal} >= Gen {current_gen}). Disabling Surrogate and setting num samples to 32.")
@@ -625,7 +620,7 @@ if __name__ == '__main__':
                         # increase entropy to force exploration
                         current_rl_entropy_beta = config.rl_entropy_beta
                         if current_rl_entropy_beta < 0.001: # Increase to a max of 0.001
-                            config.rl_entropy_beta = current_rl_entropy_beta + 0.00025
+                            config.rl_entropy_beta = current_rl_entropy_beta + 0.001
                         else:
                             # We have still stalled despite a high entropy bonus, it's time to terminate RL
                             print(f">> High Entropy ({current_rl_entropy_beta:.4f}) insufficient to resolve stalling. Switching to TASAR for inference.")
