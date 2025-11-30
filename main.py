@@ -554,7 +554,7 @@ if __name__ == '__main__':
         # Patience tracking
         best_pmo_auc = 0.0
         patience_counter = 0
-        PATIENCE_LIMIT = 500  # Stop if no AUC gain in 500 epochs
+        PATIENCE_LIMIT = 100  # Stop if no AUC gain in 100 epochs
 
         for epoch in range(config.num_epochs):
             print("------")
