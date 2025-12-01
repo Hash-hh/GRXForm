@@ -17,7 +17,7 @@ class SurrogateModel:
     def __init__(self, use_classifier=True, percentile_threshold=80):
         # self.model = RandomForestClassifier(n_estimators=100, n_jobs=1, max_depth=10)
         self.model = RandomForestClassifier(
-            n_estimators=500,
+            n_estimators=100,
             n_jobs=-1,  # Use all CPUs
             max_depth=None,  # Let trees grow deep to learn chemical nuances
             min_samples_leaf=1,  # if >1, regularization: prevents memorizing singletons (better than max_depth)

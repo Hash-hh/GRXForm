@@ -546,7 +546,7 @@ if __name__ == '__main__':
         similarity_threshold_hof = config.similarity_threshold_hof
 
         # --- PMO / TASAR Logic Variables ---
-        RL_BUDGET_LIMIT = 7500 # Stop RL when this many unique calls are made
+        RL_BUDGET_LIMIT = 10000 # Stop RL when this many unique calls are made
         unique_calls_history = []  # Track new unique calls per epoch for plateau detection
         rl_terminated = False
         surrogate_active = True
@@ -583,52 +583,52 @@ if __name__ == '__main__':
             # Plateau Check: Has RL found enough NEW molecules recently?
             if len(unique_calls_history) >= 10:
                 recent_new_calls = sum(unique_calls_history[-10:])
-                threshold = 1  # Check for fewer than 1 unique in last 10 epochs
+                threshold = 10  # Check for fewer than 10 unique in last 10 epochs
 
                 if recent_new_calls < threshold:
+                    # print(
+                    #     f">> Stalling detected: ({recent_new_calls} unique in last 10 epochs). Adjusting strategy.")
+
+                    # # 1. Get Current Settings
+                    # current_keep = config.gumbeldore_config["num_trajectories_to_keep"]
+                    # is_wor = (config.gumbeldore_config["search_type"] == "wor")
+                    # current_gen = config.gumbeldore_config["beam_width"] if is_wor else config.gumbeldore_config[
+                    #     "num_samples_per_instance"]
+                    #
+                    # # Calculate the next proposed step (doubling the filter)
+                    # next_keep_proposal = current_keep * 2
+                    #
+                    # # 2. Decide Strategy based on Surrogate State
+                    # if surrogate_active:
+                    #     # Case A: We can still widen the filter without exceeding generation size
+                    #     if next_keep_proposal < current_gen:
+                    #         config.gumbeldore_config["num_trajectories_to_keep"] = next_keep_proposal
+                    #         print(f">> Widening Filter: Keeping top {next_keep_proposal} (Gen size: {current_gen})")
+                    #
+                    #     # Case B: Filter is saturated (would equal or exceed generation size)
+                    #     else:
+                    #         # new_gen = current_gen * 2
+                    #         surrogate_active = False
+                    #         print(
+                    #             f">> Filter Saturated (Next {next_keep_proposal} >= Gen {current_gen}). Disabling Surrogate and setting num samples to 32.")
+                    #     unique_calls_history = []
+                    # else:
+                    # Case C: Surrogate is already off, and we are still stalling
                     print(
-                        f">> Stalling detected: ({recent_new_calls} unique in last 10 epochs). Adjusting strategy.")
+                        f">> Stalling detected ({recent_new_calls} unique in last 10 epochs). Increasing Entropy.")
 
-                    # 1. Get Current Settings
-                    current_keep = config.gumbeldore_config["num_trajectories_to_keep"]
-                    is_wor = (config.gumbeldore_config["search_type"] == "wor")
-                    current_gen = config.gumbeldore_config["beam_width"] if is_wor else config.gumbeldore_config[
-                        "num_samples_per_instance"]
-
-                    # Calculate the next proposed step (doubling the filter)
-                    next_keep_proposal = current_keep * 2
-
-                    # 2. Decide Strategy based on Surrogate State
-                    if surrogate_active:
-                        # Case A: We can still widen the filter without exceeding generation size
-                        if next_keep_proposal < current_gen:
-                            config.gumbeldore_config["num_trajectories_to_keep"] = next_keep_proposal
-                            print(f">> Widening Filter: Keeping top {next_keep_proposal} (Gen size: {current_gen})")
-
-                        # Case B: Filter is saturated (would equal or exceed generation size)
-                        else:
-                            # new_gen = current_gen * 2
-                            surrogate_active = False
-                            print(
-                                f">> Filter Saturated (Next {next_keep_proposal} >= Gen {current_gen}). Disabling Surrogate and setting num samples to 32.")
-                        unique_calls_history = []
+                    # increase entropy to force exploration
+                    current_rl_entropy_beta = config.rl_entropy_beta
+                    if current_rl_entropy_beta < 0.01: # Increase to a max of 0.01
+                        config.rl_entropy_beta = current_rl_entropy_beta + 0.001
                     else:
-                        # Case C: Surrogate is already off, and we are still stalling
-                        print(
-                            f">> Stalling detected ({recent_new_calls} unique in last 10 epochs). Increasing Entropy.")
+                        # We have still stalled despite a high entropy bonus, it's time to terminate RL
+                        print(f">> High Entropy ({current_rl_entropy_beta:.4f}) insufficient to resolve stalling. Switching to TASAR for inference.")
+                        rl_terminated = True
 
-                        # increase entropy to force exploration
-                        current_rl_entropy_beta = config.rl_entropy_beta
-                        if current_rl_entropy_beta < 0.001: # Increase to a max of 0.001
-                            config.rl_entropy_beta = current_rl_entropy_beta + 0.001
-                        else:
-                            # We have still stalled despite a high entropy bonus, it's time to terminate RL
-                            print(f">> High Entropy ({current_rl_entropy_beta:.4f}) insufficient to resolve stalling. Switching to TASAR for inference.")
-                            rl_terminated = True
-
-                        print(f">> New Entropy Beta: {config.rl_entropy_beta:.4f}")
-                        # Reset history to give the new entropy setting time to work
-                        unique_calls_history = []
+                    print(f">> New Entropy Beta: {config.rl_entropy_beta:.4f}")
+                    # Reset history to give the new entropy setting time to work
+                    unique_calls_history = []
 
             # # Plateau Check: Has RL found enough NEW molecules recently?
             # if len(unique_calls_history) >= 10:

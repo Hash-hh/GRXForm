@@ -72,8 +72,8 @@ class MoleculeConfig:
         # 'drd2', 'gsk3b', 'jnk3', 'qed'
         # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
         # 'deco_hop', 'scaffold_hop'
-        self.objective_type = os.environ.get("PMO_OBJECTIVE")
-        # self.objective_type = "valsartan_SMARTS"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = os.environ.get("PMO_OBJECTIVE")
+        self.objective_type = "median1"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
@@ -81,7 +81,7 @@ class MoleculeConfig:
         self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         # self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
 
-        target_gpu_id = os.environ.get("TARGET_GPU_ID")
+        # target_gpu_id = os.environ.get("TARGET_GPU_ID")
 
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
@@ -94,8 +94,8 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 1  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = target_gpu_id  # Must be set, as ray can have problems detecting multiple GPUs
-        # self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        # self.CUDA_VISIBLE_DEVICES = target_gpu_id  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 2000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
@@ -200,8 +200,8 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        self.rl_entropy_beta = 0.
-        # self.rl_entropy_beta = 0.001
+        # self.rl_entropy_beta = 0.
+        self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
