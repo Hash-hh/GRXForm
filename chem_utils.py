@@ -55,7 +55,7 @@ class SurrogateModel:
         seen_smiles = set()
 
         for smi, score in zip(smiles_list, scores_list):
-            if score == float("-inf") or score is None:
+            if score == float("-inf") or score is None or smi is None:
                 continue
             if smi in seen_smiles:
                 continue
@@ -100,6 +100,8 @@ class SurrogateModel:
         indices_kept = []
 
         for i, smi in enumerate(smiles_list):
+            if smi is None:
+                continue
             fp = self._get_fp(smi)
             if fp is not None:
                 X.append(fp)

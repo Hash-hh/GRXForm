@@ -73,7 +73,7 @@ class MoleculeConfig:
         # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
         # 'deco_hop', 'scaffold_hop'
         # self.objective_type = os.environ.get("PMO_OBJECTIVE")
-        self.objective_type = "median1"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "isomers_c7h8n2o2"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
@@ -170,7 +170,7 @@ class MoleculeConfig:
 
         # --- WandB Logging ---
         self.use_wandb = True  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl"
+        self.wandb_project = "graphxform-rl-battery"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
         self.wandb_run_name = f"{self.objective_type}_1_group_wor_128_10_samples_chembl"
 
@@ -200,8 +200,8 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        # self.rl_entropy_beta = 0.
-        self.rl_entropy_beta = 0.001
+        self.rl_entropy_beta = 0.
+        # self.rl_entropy_beta = 0.001
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus

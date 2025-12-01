@@ -391,11 +391,11 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
 
         return results
 
-    # --- NEW: Helper for Surrogate Filtering ---
+    # --- Helper for Surrogate Filtering ---
     def apply_surrogate_filtering_and_evaluate(candidates: List[MoleculeDesign], num_keep: int):
         """
         1. If surrogate exists & is fitted, rank candidates by predicted probability.
-        2. Keep top `num_keep`.
+        2. Keep top `num_keep` UNIQUE candidates.
         3. Run Real Oracle (batch_leaf_evaluation_fn) only on the kept ones.
         """
         # If no candidates, return empty
@@ -420,13 +420,22 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict, c
         pred_scores = surrogate_model.predict_ranking_scores(smiles_list)
 
         # 3. Sort candidates by predicted score (descending)
-        # Zip, sort, unzip
         paired = zip(candidates, pred_scores)
         sorted_paired = sorted(paired, key=lambda x: x[1], reverse=True)
 
-        # 4. Keep Top N
-        kept_paired = sorted_paired[:num_keep]
-        selected_candidates = [p[0] for p in kept_paired]
+        # 4. Keep Top N UNIQUE Molecules
+        selected_candidates = []
+        seen_smiles = set()
+
+        for cand, score in sorted_paired:
+            if len(selected_candidates) >= num_keep:
+                break
+
+            # Check for uniqueness
+            smi = cand.smiles_string
+            if smi and smi not in seen_smiles:
+                seen_smiles.add(smi)
+                selected_candidates.append(cand)
 
         # 5. Evaluate REAL Oracle on selected
         # Note: This consumes PMO budget only for the filtered ones!
