@@ -154,11 +154,18 @@ def train_for_one_epoch_rl(epoch: int,
     print(f"[RL] Generating trajectories (epoch {epoch + 1})...")
     # gumbeldore_dataset = GumbeldoreDataset(config=config, objective_evaluator=objective_evaluator)
 
+    if config.prodrug_mode:
+        # Use training set
+        current_prompts = config.prodrug_parents_train
+    else:
+        current_prompts = None  # Let generate_dataset use defaults
+
     # Return raw terminated trajectories (list of MoleculeDesign)
     trajectories = gumbeldore_dataset.generate_dataset(
         network_weights=network_weights,
         best_objective=None,
-        memory_aggressive=False
+        memory_aggressive=False,
+        prompts=current_prompts
     )
 
     if not trajectories or not any(trajectories):
@@ -238,7 +245,17 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
-    metrics = gumbeldore_dataset.generate_dataset(copy.deepcopy(network.get_weights()), memory_aggressive=False)
+    if config.prodrug_mode:
+        # Use TEST set for evaluation
+        test_prompts = config.prodrug_parents_test
+    else:
+        test_prompts = None
+
+    metrics = gumbeldore_dataset.generate_dataset(
+        copy.deepcopy(network.get_weights()),
+        memory_aggressive=False,
+        prompts=test_prompts
+    )
     top_20_mols = metrics["top_20_molecules"]
     metrics = {
         f"{eval_type}_mean_top_20_obj": metrics["mean_top_20_obj"],
@@ -530,6 +547,11 @@ if __name__ == '__main__':
                     for key in keys_to_log:
                         if key in generated_loggable_dict:
                             wandb_log[key] = generated_loggable_dict[key]
+
+                    # This captures 'prodrug/mean_logp_delta', 'prodrug/fraction_cleavable', etc.
+                    for key, val in generated_loggable_dict.items():
+                        if key.startswith("prodrug/"):
+                            wandb_log[key] = val
 
                 wandb.log(wandb_log)
 

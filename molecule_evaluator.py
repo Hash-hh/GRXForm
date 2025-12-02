@@ -12,6 +12,7 @@ from rdkit.Contrib.SA_Score import sascorer
 from molecule_design import MoleculeDesign
 from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_dataloader_pairs_T, sys2graph, atom_features, n_atom_features, n_bond_features
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
+from objective_predictor.Prodrug.bbb_obj import BBBObjective
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
 
@@ -168,6 +169,18 @@ class MoleculeObjectiveEvaluator:
         self.config = config
         self.device = torch.device("cpu") if device is None else device
         self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
+
+        if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
+            # Use weights from config, defaulting to 1.0 if not set
+            self.bbb_objective = BBBObjective(
+                weight_logp_delta=getattr(self.config, 'bbb_weight_logp', 1.0),
+                weight_hdonor_delta=getattr(self.config, 'bbb_weight_hdonor', 1.0),
+                weight_cleavable=getattr(self.config, 'bbb_weight_cleavable', 1.0),
+                weight_mw_penalty=getattr(self.config, 'bbb_weight_mw_penalty', 5.0),
+                max_mw=getattr(self.config, 'bbb_max_mw', 600.0),
+                weight_qed=getattr(self.config, 'bbb_weight_qed', 2.0)
+            )
+
         # initialize GuacaMol benchmarks
         guacamol_goal_directed_suite = goal_directed_suite_v2()
         self.guacamol_benchmarks = dict(
@@ -220,7 +233,44 @@ class MoleculeObjectiveEvaluator:
                 except:
                     continue
 
-        if self.config.objective_type in self.guacamol_benchmarks:
+        if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
+            objs = []
+            # We iterate over the indices of feasible molecules
+            for i, idx in enumerate(feasible_idcs):
+                mol_obj = molecule_designs[idx]
+                gen_mol = feasible_molecules[i]  # The RDKit mol from the filtering list
+
+                # 1. Retrieve Parent SMILES
+                parent_smiles = None
+                if isinstance(mol_obj, MoleculeDesign):
+                    # The prompt_smiles was stored during generation (see GumbeldoreDataset logic)
+                    parent_smiles = getattr(mol_obj, 'prompt_smiles', None)
+
+                # 2. Calculate Score
+                if parent_smiles:
+                    parent_mol = Chem.MolFromSmiles(parent_smiles)
+                    # BBBObjective.calculate returns a dict with 'total_reward' and 'metrics'
+                    results = self.bbb_objective.calculate(gen_mol, parent_mol)
+                    score = results['total_reward']
+
+                    # 3. Attach detailed info for logging
+                    if isinstance(mol_obj, MoleculeDesign):
+                        # We create a new attribute 'aux_metrics' to hold this info
+                        mol_obj.aux_metrics = results['metrics']
+                        # Add the weighted rewards too if you want to see them
+                        mol_obj.aux_metrics.update({
+                            'reward_logp': results['reward_logp_weighted'],
+                            'reward_hdonor': results['reward_hdonor_weighted'],
+                            'reward_cleavable': results['reward_cleavable_weighted']
+                        })
+                else:
+                    # Fallback/Penalty if no parent is found (e.g. pure random gen)
+                    score = -10.0
+
+                objs.append(score)
+            objs = np.array(objs)
+
+        elif self.config.objective_type in self.guacamol_benchmarks:
             # Drug design tasks
             objs = np.array([
                 self.guacamol_benchmarks[self.config.objective_type].objective.score(

@@ -134,22 +134,46 @@ class GumbeldoreDataset:
             print(f"[GRPO] Loaded {len(self.fragment_library)} fragments from {config.fragment_library_path}.")
 
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
-                         memory_aggressive: bool = False):
+                         memory_aggressive: bool = False,
+                         prompts: Optional[List[str]] = None
+                         ):
         """
         Parameters:
             network_weights: [dict] Network weights to use for generating data.
             memory_aggressive: [bool] If True, IncrementalSBS is performed "memory aggressive" meaning that
                 intermediate states in the search tree are not stored after transitioning from them, only their
                 policies.
+            prompts: [List[str], optional] List of SMILES strings to use as prompts in Prodrug mode.
 
         Behavior:
             - If config.use_dr_grpo is False: returns metrics dict (original behavior).
             - If config.use_dr_grpo is True: returns a flat List[MoleculeDesign] (raw trajectories) and does NOT call process_results.
+            - Also accept `prompts` (List[str]) for Prodrug mode.
         """
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                           self.gumbeldore_config["batch_size_per_cpu_worker"])
 
-        if self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
+        problem_instances = []
+
+        is_prodrug_mode = getattr(self.config, 'prodrug_mode', False)
+
+        if is_prodrug_mode:
+            # If prompts are passed explicitly (e.g. from main.py), use them.
+            # Otherwise, fall back to the training set defined in config.
+            target_smiles = prompts if prompts is not None else getattr(self.config, 'prodrug_parents_train', [])
+
+            if not target_smiles:
+                raise ValueError(
+                    "[Prodrug] No parent SMILES found! Check config.prodrug_parents_train or pass prompts.")
+
+            print(f"[Prodrug] Generating designs for {len(target_smiles)} parent drugs.")
+
+            for smi in target_smiles:
+                # Create a design starting from this SMILES (do_finish=False makes it a prompt)
+                inst = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                problem_instances.append(inst)
+
+        elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
             # We want one prompt to always be "C", so we sample N-1 from the library
             num_prompts_from_lib = self.config.num_prompts_per_epoch - 1
             if num_prompts_from_lib > 0:
@@ -236,6 +260,16 @@ class GumbeldoreDataset:
                     grouped_designs.append([leaf.state for leaf in group_result])
                 else:
                     grouped_designs.append(group_result)  # It's already List[MoleculeDesign]
+
+            # [PRODRUG GROUPING LOGIC]
+            # If we do NOT want to group by parent (i.e., we want one big baseline across all drugs),
+            # we flatten the list of lists into a single list containing one big list.
+            use_grouping = getattr(self.config, 'prodrug_use_grouping', True)
+
+            if is_prodrug_mode and not use_grouping:
+                print("[Prodrug] Grouping DISABLED. Flattening all trajectories into a single group.")
+                all_mols = [m for group in grouped_designs for m in group]
+                return [all_mols]  # Return format: List[List[MoleculeDesign]] -> One group
 
             return grouped_designs  # Return the List[List[MoleculeDesign]]
 

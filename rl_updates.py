@@ -353,6 +353,8 @@ def dr_grpo_update(model: MoleculeTransformer,
     avg_novelty_bonus = 0.0
     total_bonus_count = 0
     all_baselines = []  # For logging
+    aux_metrics_sum = {}
+    aux_metrics_count = 0
 
     print(f"[GRPO] Received {len(designs_groups)} groups for update.")
 
@@ -365,6 +367,15 @@ def dr_grpo_update(model: MoleculeTransformer,
         if not records_group:
             print(f"[GRPO] Group {i} was empty after filtering.")
             continue
+
+        for r in records_group:
+            # Check if our evaluator attached metrics
+            if hasattr(r.design, 'aux_metrics') and r.design.aux_metrics:
+                for key, val in r.design.aux_metrics.items():
+                    # Convert booleans/numpy types to float for summation
+                    val_float = float(val)
+                    aux_metrics_sum[key] = aux_metrics_sum.get(key, 0.0) + val_float
+                aux_metrics_count += 1
 
         # Apply novelty bonus (optional, now applied per-group)
         if novelty_memory is not None and config.rl_use_novelty_bonus:
@@ -449,6 +460,12 @@ def dr_grpo_update(model: MoleculeTransformer,
         "mean_entropy": float(total_mean_entropy),
         "adv_norm": bool(normalize_adv)
     }
+
+    if aux_metrics_count > 0:
+        for key, total_val in aux_metrics_sum.items():
+            # Add prefix "prodrug/" to keep logs organized
+            metrics[f"prodrug/{key}"] = total_val / aux_metrics_count
+
     if logger:
         logger.info(f"[DR-GRPO] {metrics}")
     return metrics

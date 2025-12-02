@@ -70,7 +70,8 @@ class MoleculeConfig:
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
@@ -78,7 +79,7 @@ class MoleculeConfig:
 
         # Loading trained checkpoints to resume training or evaluate
         # self.load_checkpoint_from_path = "model/model_il.pt"  # If given, model checkpoint is loaded from this path.
-        self.load_checkpoint_from_path = None # "model/weights.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "model/weights.pt"  # If given, model checkpoint is loaded from this path.
         # self.load_checkpoint_from_path = None  # If given, model checkpoint is loaded from this path.
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
@@ -86,7 +87,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 1  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1400  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 500  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -155,10 +156,10 @@ class MoleculeConfig:
 
 
         # --- WandB Logging ---
-        self.use_wandb = False  # Master switch for WandB logging
+        self.use_wandb = True  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_1_group_wor_8_samples"
+        self.wandb_run_name = f"{self.objective_type}_no_groups"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
@@ -214,3 +215,30 @@ class MoleculeConfig:
         self.use_amp = True
         self.amp_dtype = "bf16"  # "bf16" preferred on modern NVIDIA GPUs; "fp16" if needed
         self.use_amp_inference = True  # Also use autocast during rollout generation
+
+        # BBB Prodrug-specific settings
+        self.prodrug_mode = 'prodrug' in self.objective_type if hasattr(self, 'objective_type') else False
+        self.prodrug_parents_train = [
+            "CN1CC[C@]23[C@@H]4[C@H]1CC5=C2C(=C(C=C5)O)O[C@H]3[C@H](C=C4)O",  # Morphine
+            "C(CC(=O)O)CN",  # GABA
+            "C1CNCCC1C(=O)O",  # Nipecotic Acid
+            "CC(=O)OC1=CC=CC=C1C(=O)O"  # Aspirin
+        ]
+
+        # Testing: Hold out Dopamine and Naltrexone
+        self.prodrug_parents_test = [
+            "C1=CC(=C(C=C1CCN)O)O",  # Dopamine
+            "C1CC1CN2CC[C@]34[C@@H]5C(=O)CC[C@]3([C@H]2CC6=C4C(=C(C=C6)O)O5)O"  # Naltrexone
+        ]
+
+        # BBB Objective Weights
+        self.bbb_weight_logp = 1.0
+        self.bbb_weight_hdonor = 1.0
+        self.bbb_weight_cleavable = 2.0
+        self.bbb_weight_qed = 2.0  # Push for drug-like molecules
+        self.bbb_weight_mw_penalty = 5.0  # Strong penalty for going over size
+        self.bbb_max_mw = 600.0  # Max Daltons
+
+        self.prodrug_parent_smiles = None  # Will be set during training
+        self.prodrug_use_grouping = False  # If True, treats each parent as a separate group in GRPO
+        self.prodrug_log_components = True  # Log individual components of prodrug objective
