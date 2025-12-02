@@ -84,10 +84,10 @@ class MoleculeConfig:
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 1  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 500  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -128,10 +128,10 @@ class MoleculeConfig:
 
             "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 8,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 8,
+            "beam_width": 128,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -155,11 +155,7 @@ class MoleculeConfig:
         self.log_to_file = True
 
 
-        # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl"
-        self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_no_groups"
+
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
@@ -240,5 +236,12 @@ class MoleculeConfig:
         self.bbb_max_mw = 600.0  # Max Daltons
 
         self.prodrug_parent_smiles = None  # Will be set during training
-        self.prodrug_use_grouping = False  # If True, treats each parent as a separate group in GRPO
         self.prodrug_log_components = True  # Log individual components of prodrug objective
+
+        self.prodrug_use_grouping = True  # If True, treats each parent as a separate group in GRPO
+
+        # --- WandB Logging ---
+        self.use_wandb = True  # Master switch for WandB logging
+        self.wandb_project = "graphxform-rl-prodrug"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"{self.objective_type}_{str(self.prodrug_use_grouping)}_groups"
