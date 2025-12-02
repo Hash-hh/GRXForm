@@ -448,6 +448,7 @@ def dr_grpo_update(model: MoleculeTransformer,
     # Calculate the mean of the *group baselines* for logging
     mean_baseline = sum(all_baselines) / len(all_baselines) if all_baselines else 0.0
 
+
     metrics = {
         "baseline": mean_baseline,
         "mean_reward": float(mean_reward),
