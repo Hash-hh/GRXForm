@@ -256,6 +256,29 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
         memory_aggressive=False,
         prompts=test_prompts
     )
+
+    all_mols = []
+    for group in metrics:
+        all_mols.extend(group)
+
+    valid_scores = [m.objective for m in all_mols if
+                    m.objective is not None and m.objective > float("-inf")]
+
+    if valid_scores:
+        best_score = max(valid_scores)
+        avg_score = sum(valid_scores) / len(valid_scores)
+
+        valid_scores.sort(reverse=True)
+        top10 = valid_scores[:10]
+        top10_avg = sum(top10) / len(top10)
+
+        print(f"   [Inference Stats] Generated: {len(all_mols)} | Valid: {len(valid_scores)}")
+        print(f"   [Inference Stats] Best Score: {best_score:.4f}")
+        print(f"   [Inference Stats] Mean Score: {avg_score:.4f}")
+        print(f"   [Inference Stats] Top-10 Mean: {top10_avg:.4f}")
+    else:
+        print("   [Inference Stats] No valid molecules found.")
+
     top_20_mols = metrics["top_20_molecules"]
     metrics = {
         f"{eval_type}_mean_top_20_obj": metrics["mean_top_20_obj"],

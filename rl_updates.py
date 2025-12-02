@@ -245,6 +245,13 @@ def streaming_replay_and_backward(model: MoleculeTransformer,
 
                 # Retrieve the old log probability from when the action was originally sampled
                 old_logp_float = rec.log_probs_history[cursor]
+
+                if not (math.isfinite(old_logp_float) and torch.isfinite(chosen_logp)):
+                    # We can't advance the clone if it's in a bad state,
+                    # so we must terminate this trajectory's replay.
+                    finished[local_idx] = True
+                    continue  # Skip to the next active trajectory in the microbatch
+
                 old_logp = torch.tensor(old_logp_float, device=device, dtype=chosen_logp.dtype)
                 ratio = torch.exp(chosen_logp - old_logp)
                 surr1 = ratio * advantage
