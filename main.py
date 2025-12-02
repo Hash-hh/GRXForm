@@ -554,7 +554,7 @@ if __name__ == '__main__':
         # Patience tracking
         best_pmo_auc = 0.0
         patience_counter = 0
-        PATIENCE_LIMIT = 5000  # Stop if no AUC gain in 100 epochs
+        PATIENCE_LIMIT = 10000  # Stop if no AUC gain in 10000 epochs
 
         for epoch in range(config.num_epochs):
             print("------")
@@ -900,7 +900,7 @@ if __name__ == '__main__':
             config.gumbeldore_config["search_type"] = "tasar"
             config.gumbeldore_config["replan_steps"] = 12
             config.gumbeldore_config["beam_width"] = 256  # Wider search
-            config.gumbeldore_config["num_trajectories_to_keep"] = 10
+            config.gumbeldore_config["num_trajectories_to_keep"] = None
 
             # 2. Use Default Prompt (Start from scratch)
             # Setting custom_prompts=None forces fallback to config defaults (e.g. C-chains)

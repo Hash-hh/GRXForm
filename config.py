@@ -4,7 +4,11 @@ import datetime
 
 class MoleculeConfig:
     def __init__(self):
-        self.seed = 42
+        # Get Run ID (1, 2, 3) for repeated experiments
+        run_id = int(os.environ.get("PMO_RUN_ID", 1))
+
+        # Change seed based on run_id to ensure randomness across the 3 runs
+        self.seed = 42 + run_id
 
         # Network and environment
         self.latent_dimension = 512
@@ -72,8 +76,8 @@ class MoleculeConfig:
         # 'drd2', 'gsk3b', 'jnk3', 'qed'
         # 'zaleplon_mpo', 'albuterol_similarity', 'perindopril_mpo', 'sitagliptin_mpo'
         # 'deco_hop', 'scaffold_hop'
-        # self.objective_type = os.environ.get("PMO_OBJECTIVE")
-        self.objective_type = "isomers_c7h8n2o2"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        self.objective_type = os.environ.get("PMO_OBJECTIVE", "albuterol_similarity")
+        # self.objective_type = "isomers_c7h8n2o2"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
@@ -81,7 +85,7 @@ class MoleculeConfig:
         self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         # self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
 
-        # target_gpu_id = os.environ.get("TARGET_GPU_ID")
+        target_gpu_id = os.environ.get("TARGET_GPU_ID", "0")
 
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
@@ -94,10 +98,10 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 1  # Number of workers for creating batches for training
-        # self.CUDA_VISIBLE_DEVICES = target_gpu_id  # Must be set, as ray can have problems detecting multiple GPUs
-        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
-        self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 2000  # Number of epochs (i.e., passes through training set) to train
+        self.CUDA_VISIBLE_DEVICES = target_gpu_id  # Must be set, as ray can have problems detecting multiple GPUs
+        # self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.training_device = "cuda:" + target_gpu_id  # Device on which to perform the supervised training
+        self.num_epochs = 3000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -129,7 +133,7 @@ class MoleculeConfig:
             # Number of trajectories with the highest objective function evaluation to keep for training
             "num_trajectories_to_keep": 10,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
-            "devices_for_workers": ["cuda:0"] * 1,
+            "devices_for_workers": ["cuda:"+target_gpu_id] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
             "destination_path": "./data/generated_molecules.pickle",
             # "destination_path": None,
@@ -162,17 +166,7 @@ class MoleculeConfig:
         #                                  datetime.datetime.now().strftime(
         #                                      "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
 
-        self.results_path = "./results/" + self.objective_type + "_" + datetime.datetime.now().strftime(
-                                             "%Y-%m-%d--%H-%M-%S")
-
         self.log_to_file = True
-
-
-        # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-battery"
-        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_1_group_wor_128_10_samples_chembl"
 
         # --- Dr. GRPO / RL fine-tuning baseline configuration ---
 
@@ -200,8 +194,24 @@ class MoleculeConfig:
         # self.rl_entropy_beta = 0.0
         # self.rl_entropy_beta = 0.0015
         # self.rl_entropy_beta = 0.001
-        self.rl_entropy_beta = 0.
+        # self.rl_entropy_beta = 0.
         # self.rl_entropy_beta = 0.001
+        self.rl_entropy_beta = float(os.environ.get("RL_ENTROPY_BETA", "0.0"))
+
+        entropy_str = str(self.rl_entropy_beta).replace(".", "p")
+
+        # Create a unique folder name
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
+        self.results_path = os.path.join(
+            "./results",
+            f"{self.objective_type}_ent_{entropy_str}_runID_{run_id}_{timestamp}"
+        )
+
+        # --- WandB Logging ---
+        self.use_wandb = False  # Master switch for WandB logging
+        self.wandb_project = "graphxform-rl-battery-chembl"
+        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
+        self.wandb_run_name = f"{self.objective_type}_wor_ent_{entropy_str}_runID_{run_id}"
 
         self.rl_use_novelty_bonus = False  # Master switch to enable/disable novelty
         self.rl_novelty_beta = 0.05  # The coefficient for the novelty bonus
