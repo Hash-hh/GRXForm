@@ -50,7 +50,7 @@ def train_for_one_epoch(epoch: int, config: MoleculeConfig, network: MoleculeTra
     print(f"Mean obj. over fresh best mols: {metrics['mean_best_gen_obj']:.3f}")
     print(f"Best / worst obj. over fresh best mols: {metrics['best_gen_obj']:.3f}, {metrics['worst_gen_obj']:.3f}")
     print(f"Mean obj. over all time top 20 mols: {metrics['mean_top_20_obj']:.3f}")
-    print(f"All time best mol: {list(metrics['top_20_molecules'][0].values())[0]:.3f}")
+    print(f"All time best mol: {list(metrics['top_20_molecules'][0].values())[0]:.3f}" if metrics['top_20_molecules'][0] else "N/A")
     torch.cuda.empty_cache()
     time.sleep(1)
     print("---- Loading dataset")

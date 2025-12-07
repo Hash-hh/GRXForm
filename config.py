@@ -20,15 +20,15 @@ class MoleculeConfig:
 
         # Environment options
         self.wall_clock_limit = None  # in seconds. If no limit, set to None
-        self.max_num_atoms = 20
+        self.max_num_atoms = 25
         # self.max_num_atoms = 50
 
         self.atom_vocabulary = {  # Attention! Order matters!
             "C":    {"allowed": True, "atomic_number": 6, "valence": 4},
             "C-":   {"allowed": False, "atomic_number": 6, "valence": 3, "formal_charge": -1},
             "C+":   {"allowed": False, "atomic_number": 6, "valence": 5, "formal_charge": 1},
-            "C@":   {"allowed": True, "atomic_number": 6, "valence": 4, "chiral_tag": 1},
-            "C@@":  {"allowed": True, "atomic_number": 6, "valence": 4, "chiral_tag": 2},
+            "C@":   {"allowed": False, "atomic_number": 6, "valence": 4, "chiral_tag": 1},
+            "C@@":  {"allowed": False, "atomic_number": 6, "valence": 4, "chiral_tag": 2},
 
             "N":    {"allowed": True, "atomic_number": 7, "valence": 3},
             "N-":   {"allowed": False, "atomic_number": 7, "valence": 2, "formal_charge": -1},
@@ -38,7 +38,7 @@ class MoleculeConfig:
             "O-":   {"allowed": False, "atomic_number": 8, "valence": 1, "formal_charge": -1},
             "O+":   {"allowed": False, "atomic_number": 8, "valence": 3, "formal_charge": 1},
 
-            "F":    {"allowed": True, "atomic_number": 9, "valence": 1},
+            "F":    {"allowed": False, "atomic_number": 9, "valence": 1},
 
             "P":    {"allowed": True, "atomic_number": 15, "valence": 7},
             "P-":   {"allowed": False, "atomic_number": 15, "valence": 6, "formal_charge": -1},
@@ -47,12 +47,12 @@ class MoleculeConfig:
             "S":    {"allowed": True, "atomic_number": 16, "valence": 6},
             "S-":   {"allowed": False, "atomic_number": 16, "valence": 5, "formal_charge": -1},
             "S+":   {"allowed": False, "atomic_number": 16, "valence": 7, "formal_charge": 1},
-            "S@":   {"allowed": True, "atomic_number": 16, "valence": 6, "chiral_tag": 1},
-            "S@@":  {"allowed": True, "atomic_number": 16, "valence": 6, "chiral_tag": 2},
+            "S@":   {"allowed": False, "atomic_number": 16, "valence": 6, "chiral_tag": 1},
+            "S@@":  {"allowed": False, "atomic_number": 16, "valence": 6, "chiral_tag": 2},
 
-            "Cl": {"allowed": True, "atomic_number": 17, "valence": 1},
-            "Br": {"allowed": True, "atomic_number": 35, "valence": 1},
-            "I": {"allowed": True, "atomic_number": 53, "valence": 1}
+            "Cl": {"allowed": False, "atomic_number": 17, "valence": 1},
+            "Br": {"allowed": False, "atomic_number": 35, "valence": 1},
+            "I": {"allowed": False, "atomic_number": 53, "valence": 1}
         }
 
         self.start_from_c_chains = True
@@ -72,7 +72,7 @@ class MoleculeConfig:
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         self.objective_type = "bpa"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "prodrug_acyclovir"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
+        self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
         self.objective_gnn_device = "cpu"  # device on which the GNN should live
         # Hyperparameters (weights) for the prodrug objective function (only used if objective_type=="prodrug_acyclovir")
@@ -94,7 +94,7 @@ class MoleculeConfig:
 
         # Training
         self.num_dataloader_workers = 10  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
         self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
