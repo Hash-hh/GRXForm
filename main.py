@@ -332,7 +332,11 @@ if __name__ == '__main__':
         # wandb.config.update({"task": config.objective_type})  # Log the task separately for easy filtering
 
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
-    ray.init(num_gpus=num_gpus, logging_level="info")
+
+    if ray.is_initialized():
+        ray.shutdown()  # In case ray was already running and messing things up
+
+    ray.init(num_gpus=num_gpus, logging_level="info", ignore_reinit_error=True)
     print(ray.available_resources())
 
     logger = Logger(args, config.results_path, config.log_to_file)

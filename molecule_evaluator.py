@@ -13,6 +13,7 @@ from molecule_design import MoleculeDesign
 from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_dataloader_pairs_T, sys2graph, atom_features, n_atom_features, n_bond_features
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
 from objective_predictor.Prodrug.bbb_obj import BBBObjective
+from objective_predictor.tdc.jnk import JNK3Objective
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
 
@@ -29,8 +30,7 @@ class PredictorWorker:
 
         self.device = device
         self.config = config
-        self.model = self._load_model()
-
+        self.model = self._load_model() if hasattr(config, "GHGNN_model_path") and config.GHGNN_model_path else None
         # Pre-calculate molecules from SMILES:
         self.pre_molecules = {
             "COC1=CC(=CC(=C1)C=O)OC": Chem.MolFromSmiles("COC1=CC(=CC(=C1)C=O)OC"),
@@ -181,6 +181,10 @@ class MoleculeObjectiveEvaluator:
                 weight_qed=getattr(self.config, 'bbb_weight_qed', 2.0)
             )
 
+        # TDC objectives
+        if getattr(self.config, 'objective_type', '') == 'jnk3':
+            self.jnk3_objective = JNK3Objective()
+
         # initialize GuacaMol benchmarks
         guacamol_goal_directed_suite = goal_directed_suite_v2()
         self.guacamol_benchmarks = dict(
@@ -278,6 +282,13 @@ class MoleculeObjectiveEvaluator:
                 )
                 for rdkit_mol in feasible_molecules
             ])
+
+        elif getattr(self.config, 'objective_type', '') == 'jnk3':
+            objs = np.array([
+                self.jnk3_objective.score(Chem.MolToSmiles(rdkit_mol))
+                for rdkit_mol in feasible_molecules
+            ])
+
         else:
             # Distribute the list of feasible molecules to the predictor workers.
             num_per_worker = math.ceil(len(feasible_molecules) / len(self.predictor_workers))
