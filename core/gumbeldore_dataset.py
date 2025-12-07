@@ -250,28 +250,37 @@ class GumbeldoreDataset:
         # RL mode: return raw MoleculeDesign list (no metrics dict)
         if self.config.use_dr_grpo:
             grouped_designs: List[List[MoleculeDesign]] = []
-            for group_result in results:  # `group_result` is one List[BeamLeaf] or List[MoleculeDesign]
+
+            for group_result in results:
                 if not group_result:
                     continue
 
-
+                # Normalize: Ensure we always have a list of MoleculeDesign objects
                 # Check if it's BeamLeaf objects (from 'wor') or MoleculeDesign (from 'iid_mc')
                 if isinstance(group_result[0], sbs.BeamLeaf):
                     grouped_designs.append([leaf.state for leaf in group_result])
                 else:
-                    grouped_designs.append(group_result)  # It's already List[MoleculeDesign]
+                    grouped_designs.append(group_result)
 
-            # [PRODRUG GROUPING LOGIC]
-            # If we do NOT want to group by parent (i.e., we want one big baseline across all drugs),
-            # we flatten the list of lists into a single list containing one big list.
-            use_grouping = getattr(self.config, 'prodrug_use_grouping', True)
+            # Check if we should enforce grouping (Local Baseline) or flatten (Global Baseline)
+            # Default to True (Standard GRPO)
+            use_grouping = getattr(self.config, 'use_grpo_grouping', True)
 
-            if is_prodrug_mode and not use_grouping:
-                print("[Prodrug] Grouping DISABLED. Flattening all trajectories into a single group.")
+            if not use_grouping:
+                # GLOBAL BASELINE MODE (Ablation)
+                # We flatten all groups into one massive group.
+                # This treats every molecule as if it came from the same distribution,
+                # calculating Advantage relative to the GLOBAL mean.
+                print(
+                    f"[GRPO] Grouping DISABLED (Global Baseline). Flattening {len(grouped_designs)} scaffolds into 1 group.")
+
                 all_mols = [m for group in grouped_designs for m in group]
-                return [all_mols]  # Return format: List[List[MoleculeDesign]] -> One group
+                return [all_mols]  # Returns List containing one massive List[MoleculeDesign]
 
-            return grouped_designs  # Return the List[List[MoleculeDesign]]
+            # LOCAL BASELINE MODE (Standard GRPO)
+            # Returns List of Lists. Advantage is calculated relative to the SCAFFOLD mean.
+            return grouped_designs
+
 
             # flat: List[MoleculeDesign] = []
             # for lst in results:
