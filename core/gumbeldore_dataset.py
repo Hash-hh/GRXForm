@@ -135,10 +135,12 @@ class GumbeldoreDataset:
 
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False,
-                         prompts: Optional[List[str]] = None
+                         prompts: Optional[List[str]] = None,
+                         return_raw_trajectories: bool = False
                          ):
         """
         Parameters:
+            return_raw_trajectories: During eval we want to always return the raw trajectories
             network_weights: [dict] Network weights to use for generating data.
             memory_aggressive: [bool] If True, IncrementalSBS is performed "memory aggressive" meaning that
                 intermediate states in the search tree are not stored after transitioning from them, only their
@@ -149,6 +151,13 @@ class GumbeldoreDataset:
             - If config.use_dr_grpo is False: returns metrics dict (original behavior).
             - If config.use_dr_grpo is True: returns a flat List[MoleculeDesign] (raw trajectories) and does NOT call process_results.
             - Also accept `prompts` (List[str]) for Prodrug mode.
+
+        Generates trajectories.
+        Hierarchy:
+        1. prompts arg (Testing)
+        2. Prodrug Mode (Config)
+        3. Fragment Library (Training Scaffolds)
+        4. C-Chain / Single Atom (De Novo)
         """
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                           self.gumbeldore_config["batch_size_per_cpu_worker"])
@@ -157,56 +166,57 @@ class GumbeldoreDataset:
 
         is_prodrug_mode = getattr(self.config, 'prodrug_mode', False)
 
-        if is_prodrug_mode:
-            # If prompts are passed explicitly (e.g. from main.py), use them.
-            # Otherwise, fall back to the training set defined in config.
-            target_smiles = prompts if prompts is not None else getattr(self.config, 'prodrug_parents_train', [])
+        # Explicit Prompts (TESTING / INFERENCE)
+        # Used when evaluate() passes the test_scaffolds list
+        if prompts is not None and len(prompts) > 0:
+            # print(f"[Generator] Using {len(prompts)} provided prompts (Inference).")
+            for smi in prompts:
+                problem_instances.append(
+                    MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                )
 
-            if not target_smiles:
-                raise ValueError(
-                    "[Prodrug] No parent SMILES found! Check config.prodrug_parents_train or pass prompts.")
-
-            print(f"[Prodrug] Generating designs for {len(target_smiles)} parent drugs.")
-
+        # Prodrug Mode (Training)
+        elif is_prodrug_mode:
+            target_smiles = getattr(self.config, 'prodrug_parents_train', [])
+            if not target_smiles: raise ValueError("Prodrug mode enabled but no parents found.")
             for smi in target_smiles:
-                # Create a design starting from this SMILES (do_finish=False makes it a prompt)
-                inst = MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
-                problem_instances.append(inst)
+                problem_instances.append(
+                    MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                )
 
+        # Scaffold Training Mode
         elif self.config.use_dr_grpo and self.config.use_fragment_library and self.fragment_library:
-            # We want one prompt to always be "C", so we sample N-1 from the library
-            num_prompts_from_lib = self.config.num_prompts_per_epoch - 1
-            if num_prompts_from_lib > 0:
-                sampled_smiles_list = random.sample(self.fragment_library, num_prompts_from_lib)
+            # Sample N random scaffolds from the loaded library
+            n_prompts = self.config.num_prompts_per_epoch
+
+            # Safety check if library is smaller than requested batch
+            if n_prompts > len(self.fragment_library):
+                sampled = random.sample(self.fragment_library, len(self.fragment_library))
             else:
-                sampled_smiles_list = []  # In case num_prompts_per_epoch is 1
+                sampled = random.sample(self.fragment_library, n_prompts)
 
-            # Manually add the single Carbon atom as a prompt
-            sampled_smiles_list.append("C")
-            print(f"[GRPO] Sampling {num_prompts_from_lib} fragments + 1 'C' atom prompt.")
-
-            # Create MoleculeDesign objects from these SMILES
-            problem_instances = []
-            for smi in sampled_smiles_list:
+            # print(f"[Generator] Sampling {len(sampled)} scaffolds for training.")
+            for smi in sampled:
                 try:
-                    # Our from_smiles function will correctly handle "C"
-                    # and turn it into a clean prompt, just like get_c_chains did.
                     problem_instances.append(
                         MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
                     )
                 except Exception as e:
-                    print(f"[GRPO] Warning: Failed to load fragment '{smi}'. Skipping. Error: {e}")
+                    print(f"[Warning] Failed to load scaffold {smi}: {e}")
 
-            if not problem_instances:
-                raise ValueError("[GRPO] Error: No valid fragments could be loaded from the fragment library.")
-
+        # De Novo / C-Chain Mode
         elif self.config.start_from_c_chains:
+            # print(f"[Generator] Starting from C-chains (De Novo).")
             problem_instances = MoleculeDesign.get_c_chains(self.config)
-        elif self.config.start_from_smiles is not None:
-            problem_instances = [MoleculeDesign.from_smiles(self.config, self.config.start_from_smiles)]
+
+        # Single Atom Fallback
         else:
             problem_instances = MoleculeDesign.get_single_atom_molecules(self.config,
                                                                          repeat=self.config.repeat_start_instances)
+
+        if not problem_instances:
+            raise ValueError("No instances created. Check Config.")
+
 
         job_pool = JobPool.remote(copy.deepcopy(problem_instances))
         results = [None] * len(problem_instances)
@@ -262,24 +272,30 @@ class GumbeldoreDataset:
                 else:
                     grouped_designs.append(group_result)
 
+            # Caller want raw trajectories during evaluation
+            if return_raw_trajectories:
+                # During Evaluation, we ALWAYS want the groups preserved to calculate per-scaffold stats.
+                # Even if we trained with Global Baseline (no grouping), we Evaluate per scaffold.
+                return grouped_designs
+
             # Check if we should enforce grouping (Local Baseline) or flatten (Global Baseline)
             # Default to True (Standard GRPO)
             use_grouping = getattr(self.config, 'use_grpo_grouping', True)
 
-            if not use_grouping:
-                # GLOBAL BASELINE MODE (Ablation)
-                # We flatten all groups into one massive group.
-                # This treats every molecule as if it came from the same distribution,
-                # calculating Advantage relative to the GLOBAL mean.
-                print(
-                    f"[GRPO] Grouping DISABLED (Global Baseline). Flattening {len(grouped_designs)} scaffolds into 1 group.")
-
+            if use_grouping:
+                # STANDARD GRPO: Return List of Lists [[Mols_Scaffold_A], [Mols_Scaffold_B]]
+                # Advantage is calculated locally per list.
+                return grouped_designs
+            else:
+                # GLOBAL BASELINE (Ablation): Return List of one List [[All_Mols]]
+                # Advantage is calculated globally across the entire batch.
+                print("[GRPO] Grouping DISABLED. Flattening batch.")
                 all_mols = [m for group in grouped_designs for m in group]
-                return [all_mols]  # Returns List containing one massive List[MoleculeDesign]
+                return [all_mols]
 
-            # LOCAL BASELINE MODE (Standard GRPO)
-            # Returns List of Lists. Advantage is calculated relative to the SCAFFOLD mean.
-            return grouped_designs
+        # LOCAL BASELINE MODE (Standard GRPO)
+        # Returns List of Lists. Advantage is calculated relative to the SCAFFOLD mean.
+        return self.process_results(problem_instances, results)
 
 
             # flat: List[MoleculeDesign] = []

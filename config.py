@@ -55,7 +55,7 @@ class MoleculeConfig:
         #     "O": {"allowed": True, "atomic_number": 8, "valence": 2}
         # }
 
-        self.start_from_c_chains = True
+        self. start_from_c_chains= True
         self.start_c_chain_max_len = 1
         self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
@@ -65,13 +65,17 @@ class MoleculeConfig:
         self.include_structural_constraints = False
 
         # Objective molecule predictor
-        self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
-        self.GHGNN_hidden_dim = 113
+        # self.GHGNN_model_path = os.path.join("objective_predictor/GH_GNN_IDAC/models/GHGNN.pth")
+        # self.GHGNN_hidden_dim = 113
         # self.objective_type = "celecoxib_rediscovery"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "median_tadalafil_sildenafil"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "zaleplon_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
         # self.objective_type = "ranolazine_mpo"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
-        self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+        # self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
+
+        # TDC objs
+        self.objective_type = "jnk3"
+
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
         self.objective_predictor_batch_size = 64
@@ -84,10 +88,10 @@ class MoleculeConfig:
         self.load_optimizer_state = False  # If True, the optimizer state is also loaded.
 
         # Training
-        self.num_dataloader_workers = 10  # Number of workers for creating batches for training
+        self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 1  #1000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -162,10 +166,13 @@ class MoleculeConfig:
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
         self.use_fragment_library = False  # Master switch for GRPO prompting
-        self.fragment_library_path = "data/GDB17.50000000LL.noSR_filtered.txt"
+        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
-        self.num_prompts_per_epoch = 5
+        self.num_prompts_per_epoch = 2
+
+        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds_small.txt"
+        self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
         # K: Number of completions per prompt is already set by:
         # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
@@ -188,7 +195,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 265  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
@@ -238,10 +245,10 @@ class MoleculeConfig:
         self.prodrug_parent_smiles = None  # Will be set during training
         self.prodrug_log_components = True  # Log individual components of prodrug objective
 
-        self.prodrug_use_grouping = True  # If True, treats each parent as a separate group in GRPO
+        self.use_grpo_grouping = False  # If True, treats each parent as a separate group in GRPO
 
         # --- WandB Logging ---
-        self.use_wandb = True  # Master switch for WandB logging
+        self.use_wandb = False  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-prodrug"
-        self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_{str(self.prodrug_use_grouping)}_groups"
+        self.wandb_entity = "hasham"  # wandb username or team name
+        self.wandb_run_name = f"{self.objective_type}_{str(self.use_grpo_grouping)}_groups"

@@ -1,0 +1,79 @@
+Scenario A: Case 1 (De Novo Training)
+Train on "C", ignore scaffolds. Test on Scaffolds to see if it generalizes.
+
+class MoleculeConfig:
+    # ... standard settings ...
+
+    # --- TRAINING (Start from C) ---
+    self.start_from_c_chains = True      # <--- ON
+    self.use_fragment_library = False    # <--- OFF
+    self.fragment_library_path = None    # Ignored
+
+    # --- INFERENCE (Test on Scaffolds) ---
+    # Even though we trained on C, we force testing on these scaffolds
+    self.evaluation_scaffolds_path = "zinc_splits/run_seed_42/test_scaffolds.txt"
+
+    # --- RL METHOD ---
+    self.use_dr_grpo = True
+    self.use_grpo_grouping = True        # Standard GRPO
+
+
+
+Scenario B: Case 2 (Scaffold Training)
+Train on Train Scaffolds. Test on Test Scaffolds.
+
+class MoleculeConfig:
+    # ... standard settings ...
+
+    # --- TRAINING (Start from Train Scaffolds) ---
+    self.start_from_c_chains = False     # <--- OFF
+    self.use_fragment_library = True     # <--- ON
+    self.fragment_library_path = "zinc_splits/run_seed_42/train_scaffolds.txt"
+
+    # --- INFERENCE (Test on Test Scaffolds) ---
+    self.evaluation_scaffolds_path = "zinc_splits/run_seed_42/test_scaffolds.txt"
+
+    # --- RL METHOD ---
+    self.use_dr_grpo = True
+    self.use_grpo_grouping = True        # Standard GRPO
+
+
+
+Scenario C: Ablation Study (Global Baseline)
+Train on Scaffolds, but DISABLE grouping to simulate standard Reinforce/PPO.
+
+
+class MoleculeConfig:
+    # ... standard settings ...
+
+    # --- TRAINING ---
+    self.start_from_c_chains = False
+    self.use_fragment_library = True
+    self.fragment_library_path = "zinc_splits/run_seed_42/train_scaffolds.txt"
+
+    # --- INFERENCE ---
+    self.evaluation_scaffolds_path = "zinc_splits/run_seed_42/test_scaffolds.txt"
+
+    # --- RL METHOD ---
+    self.use_dr_grpo = True
+    self.use_grpo_grouping = False       # <--- FALSE (Global Baseline)
+
+
+
+Scenario D: De Novo Baseline (Sanity Check)
+Train on C, Test on C (Unconditional Generation).
+
+class MoleculeConfig:
+    # ... standard settings ...
+
+    # --- TRAINING ---
+    self.start_from_c_chains = True
+    self.use_fragment_library = False
+
+    # --- INFERENCE ---
+    # Setting this to None forces generate_dataset to fallback to Training logic (C-chains)
+    self.evaluation_scaffolds_path = None 
+
+    # --- RL METHOD ---
+    self.use_dr_grpo = True
+    self.use_grpo_grouping = False       # Grouping doesn't matter much for unconditional, but False is safer
