@@ -267,16 +267,28 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
             with open(path, 'r') as f:
                 test_prompts = [line.strip() for line in f if line.strip()]
 
+            # Use only 1% of scaffolds to avoid memory issues
+            original_count = len(test_prompts)
+            sample_size = max(1, int(original_count * 0.01))  # 1%
+            test_prompts = test_prompts[:sample_size]
+            print(f"[Eval] Using {sample_size}/{original_count} scaffolds (0.1% sample)")
+
             # Optional: Subset for speed during training checks
             if eval_type != 'test':
                 test_prompts = test_prompts[:32]
-            else:
-                # Enable batched evaluation for large test sets
-                if len(test_prompts) > EVAL_BATCH_SIZE:
-                    use_batched_eval = True
-                    print(f"[Eval] Large test set ({len(test_prompts)} scaffolds). Using batched evaluation.")
+                print(f"[Eval] Non-test mode: further limited to {len(test_prompts)} scaffolds")
+
+            # Enable batched evaluation for large test sets
+            if len(test_prompts) > EVAL_BATCH_SIZE:
+                use_batched_eval = True
+                print(f"[Eval] Large test set ({len(test_prompts)} scaffolds). Using batched evaluation.")
         else:
             print(f"[Eval] WARNING: Config path {path} not found.")
+
+    # If no path, check Prodrug mode
+    elif config.prodrug_mode:
+        test_prompts = config.prodrug_parents_test
+        print(f"[Eval] Using {len(test_prompts)} prodrug parent scaffolds for evaluation")
 
     # If no path, check Prodrug mode
     elif config.prodrug_mode:

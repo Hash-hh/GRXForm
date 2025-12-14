@@ -56,7 +56,7 @@ class MoleculeConfig:
         #     "O": {"allowed": True, "atomic_number": 8, "valence": 2}
         # }
 
-        self. start_from_c_chains= False
+        self. start_from_c_chains= True
         self.start_c_chain_max_len = 1
         self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
@@ -92,7 +92,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 500  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -136,7 +136,7 @@ class MoleculeConfig:
             "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 128,  # 32
+            "beam_width": 320,
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -166,11 +166,12 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.use_fragment_library = True  # Master switch for GRPO prompting
-        self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
+        self.use_fragment_library = False  # Master switch for GRPO prompting
+        self.fragment_library_path = None  # Path to TRAINING scaffolds
+        # self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
-        self.num_prompts_per_epoch = 32  #10
+        self.num_prompts_per_epoch = 10
 
         self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
@@ -252,7 +253,7 @@ class MoleculeConfig:
         self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"Case2_Scaffold_Training_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
