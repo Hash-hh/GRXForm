@@ -1,5 +1,6 @@
 import os
 import datetime
+import platform
 
 
 class MoleculeConfig:
@@ -248,7 +249,11 @@ class MoleculeConfig:
         self.use_grpo_grouping = True  # If True, treats each parent as a separate group in GRPO
 
         # --- WandB Logging ---
-        self.use_wandb = False  # Master switch for WandB logging
+        self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = "hasham"  # wandb username or team name
         self.wandb_run_name = f"Case2_Scaffold_Training_{self.objective_type}_Seed{self.seed}"
+
+        # Resolve "auto" setting based on OS
+        if self.use_wandb == "auto":
+            self.use_wandb = platform.system() == "Linux"
