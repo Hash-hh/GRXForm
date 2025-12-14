@@ -226,6 +226,12 @@ def train_for_one_epoch_rl(epoch: int,
     unique_mols.sort(key=lambda x: x["obj"], reverse=True)
     top20 = unique_mols[:20]
 
+    if top20:
+        mean_top20_obj = sum(entry["obj"] for entry in top20) / len(top20)
+        metrics["mean_top_20_obj"] = mean_top20_obj
+    else:
+        metrics["mean_top_20_obj"] = float("-inf")
+
     top_20_text_lines = []
     for i, entry in enumerate(top20):
         top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
@@ -240,6 +246,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     Uses generation (supervised-style metrics) for evaluation irrespective of RL training.
     If a fragment library is used (Scaffold Decoration), it attempts to load
     the corresponding 'test_scaffolds.txt' to perform zero-shot evaluation.
+    Processes large test sets in batches to avoid OOM.
     """
     config = copy.deepcopy(config)
     config.gumbeldore_config["destination_path"] = None
@@ -249,6 +256,8 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     )
 
     test_prompts = None
+    use_batched_eval = False
+    EVAL_BATCH_SIZE = 500  # Process scaffolds in batches of 500
 
     # Check if a specific TEST file is defined in config
     if getattr(config, 'evaluation_scaffolds_path', None):
@@ -256,13 +265,16 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
         if os.path.exists(path):
             print(f"[Eval] Loading Test Scaffolds from: {path}")
             with open(path, 'r') as f:
-                # Read lines and filter empty
                 test_prompts = [line.strip() for line in f if line.strip()]
 
             # Optional: Subset for speed during training checks
             if eval_type != 'test':
                 test_prompts = test_prompts[:32]
-            # else: use all of them
+            else:
+                # Enable batched evaluation for large test sets
+                if len(test_prompts) > EVAL_BATCH_SIZE:
+                    use_batched_eval = True
+                    print(f"[Eval] Large test set ({len(test_prompts)} scaffolds). Using batched evaluation.")
         else:
             print(f"[Eval] WARNING: Config path {path} not found.")
 
@@ -270,69 +282,89 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     elif config.prodrug_mode:
         test_prompts = config.prodrug_parents_test
 
-    # If test_prompts is STILL None here, we pass None to generate_dataset.
-    # The dataset logic will then fall back to the TRAIN config (Case 1 'C' or Case 2 Scaffolds).
-
-    grouped_trajectories = gumbeldore_dataset.generate_dataset(
-        copy.deepcopy(network.get_weights()),
-        memory_aggressive=False,
-        prompts=test_prompts,
-        return_raw_trajectories=True
-    )
-
-    # --- ANALYSIS (The "Generalization Metrics") ---
+    # Parameters for "Success"
+    SUCCESS_THRESHOLD = 0.5
 
     scaffold_metrics = []
-    all_valid_mols = []  # For top-20 list
+    all_valid_mols = []
 
-    # Parameters for "Success"
-    SUCCESS_THRESHOLD = 0.5  # e.g. JNK3 > 0.5 is "Active"
+    if use_batched_eval and test_prompts is not None:
+        # --- BATCHED EVALUATION ---
+        num_batches = (len(test_prompts) + EVAL_BATCH_SIZE - 1) // EVAL_BATCH_SIZE
+        print(f"[Eval] Processing {len(test_prompts)} scaffolds in {num_batches} batches...")
 
-    for i, group in enumerate(grouped_trajectories):
-        if not group:
-            continue
+        for batch_idx in tqdm(range(num_batches), desc="Eval Batches"):
+            start_idx = batch_idx * EVAL_BATCH_SIZE
+            end_idx = min(start_idx + EVAL_BATCH_SIZE, len(test_prompts))
+            batch_prompts = test_prompts[start_idx:end_idx]
 
-        # Extract objectives (filter out Nones)
-        objs = [m.objective for m in group if m.objective is not None]
-        valid_mols = [m for m in group if m.objective is not None]
-        all_valid_mols.extend(valid_mols)
+            # Generate for this batch
+            grouped_trajectories = gumbeldore_dataset.generate_dataset(
+                copy.deepcopy(network.get_weights()),
+                memory_aggressive=False,
+                prompts=batch_prompts,
+                return_raw_trajectories=True
+            )
 
-        if not objs:
-            scaffold_metrics.append({
-                "solved": 0.0,
-                "top1": 0.0,
-                "mean": 0.0
-            })
-            continue
+            # Process batch results
+            for group in grouped_trajectories:
+                if not group:
+                    continue
+                objs = [m.objective for m in group if m.objective is not None]
+                valid_mols = [m for m in group if m.objective is not None]
+                all_valid_mols.extend(valid_mols)
 
-        # Per-Scaffold Stats
-        best_score = max(objs)
-        mean_score = np.mean(objs)
-        is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+                if not objs:
+                    scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
+                    continue
 
-        scaffold_metrics.append({
-            "solved": is_solved,
-            "top1": best_score,
-            "mean": mean_score
-        })
+                best_score = max(objs)
+                mean_score = np.mean(objs)
+                is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+                scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
+
+            # Clear memory between batches
+            del grouped_trajectories
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+
+    else:
+        # --- ORIGINAL NON-BATCHED PATH ---
+        grouped_trajectories = gumbeldore_dataset.generate_dataset(
+            copy.deepcopy(network.get_weights()),
+            memory_aggressive=False,
+            prompts=test_prompts,
+            return_raw_trajectories=True
+        )
+
+        for group in grouped_trajectories:
+            if not group:
+                continue
+            objs = [m.objective for m in group if m.objective is not None]
+            valid_mols = [m for m in group if m.objective is not None]
+            all_valid_mols.extend(valid_mols)
+
+            if not objs:
+                scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
+                continue
+
+            best_score = max(objs)
+            mean_score = np.mean(objs)
+            is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+            scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
 
     # --- AGGREGATION ---
-
     if not scaffold_metrics:
         print("[Eval] Warning: No valid molecules generated.")
         return {}, []
 
-    # 1. Success Rate (% of scaffolds where we found at least one good molecule)
     avg_success_rate = np.mean([m["solved"] for m in scaffold_metrics])
-
-    # 2. Mean Top-1 (Average of the best scores) - The truest measure of design capability
     avg_top1_score = np.mean([m["top1"] for m in scaffold_metrics])
-
-    # 3. Overall stats
     avg_mean_score = np.mean([m["mean"] for m in scaffold_metrics])
 
     metrics_out = {
-        f"{eval_type}_success_rate": avg_success_rate,  # Key for Scalability Plot
+        f"{eval_type}_success_rate": avg_success_rate,
         f"{eval_type}_mean_top1_obj": avg_top1_score,
         f"{eval_type}_global_mean_obj": avg_mean_score,
         f"{eval_type}_num_scaffolds_evaluated": len(scaffold_metrics)
@@ -345,8 +377,6 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print(f"Mean Top-1 Score: {avg_top1_score:.4f}")
     print("=" * 30)
 
-    # --- TOP 20 LIST (For text artifact) ---
-    # Sort all generated molecules by score to show the absolute best found
     all_valid_mols.sort(key=lambda x: x.objective, reverse=True)
     top_20_objects = all_valid_mols[:20]
 
@@ -356,6 +386,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
         top_20_text_lines.append(f"{i + 1:02d}: {smi}  obj={m.objective:.4f}")
 
     return metrics_out, top_20_text_lines
+
 
 
 
@@ -634,7 +665,8 @@ if __name__ == '__main__':
                         'policy_loss',
                         'mean_entropy',
                         'mean_traj_length',
-                        'num_trajectories'
+                        'num_trajectories',
+                        'mean_top_20_obj'
                         # 'mean_novelty_bonus'
                     ]
                     # Add only the specified metrics to the log

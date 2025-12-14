@@ -55,7 +55,7 @@ class MoleculeConfig:
         #     "O": {"allowed": True, "atomic_number": 8, "valence": 2}
         # }
 
-        self. start_from_c_chains= True
+        self. start_from_c_chains= False
         self.start_c_chain_max_len = 1
         self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
@@ -91,7 +91,7 @@ class MoleculeConfig:
         self.num_dataloader_workers = 1  #10  # Number of workers for creating batches for training
         self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:0"  # Device on which to perform the supervised training
-        self.num_epochs = 1  #1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 1  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
@@ -165,14 +165,14 @@ class MoleculeConfig:
 
         self.use_dr_grpo = True  # Enable RL fine-tuning (vs pure supervised)
 
-        self.use_fragment_library = False  # Master switch for GRPO prompting
+        self.use_fragment_library = True  # Master switch for GRPO prompting
         self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
-        self.num_prompts_per_epoch = 2
+        self.num_prompts_per_epoch = 32
 
-        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds_small.txt"
-        self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
+        self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
+        # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
         # K: Number of completions per prompt is already set by:
         # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
@@ -245,10 +245,10 @@ class MoleculeConfig:
         self.prodrug_parent_smiles = None  # Will be set during training
         self.prodrug_log_components = True  # Log individual components of prodrug objective
 
-        self.use_grpo_grouping = False  # If True, treats each parent as a separate group in GRPO
+        self.use_grpo_grouping = True  # If True, treats each parent as a separate group in GRPO
 
         # --- WandB Logging ---
         self.use_wandb = False  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-prodrug"
+        self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"{self.objective_type}_{str(self.use_grpo_grouping)}_groups"
+        self.wandb_run_name = f"Case2_Scaffold_Training_{self.objective_type}_Seed{self.seed}"
