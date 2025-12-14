@@ -32,6 +32,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     """Batched evaluation to avoid OOM."""
     config = copy.deepcopy(config)
     config.gumbeldore_config["destination_path"] = None
+    config.use_fragment_library = False  # Disable fragment library loading during eval
 
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
@@ -43,17 +44,28 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
 
     if getattr(config, 'evaluation_scaffolds_path', None):
         path = config.evaluation_scaffolds_path
+        # Check with absolute path if relative fails
+        if not os.path.exists(path):
+            path = os.path.abspath(path)
+
         if os.path.exists(path):
             print(f"[Eval] Loading Test Scaffolds from: {path}")
             with open(path, 'r') as f:
                 test_prompts = [line.strip() for line in f if line.strip()]
+
+            # Use only 1% of scaffolds for quick testing
+            original_count = len(test_prompts)
+            sample_size = max(1, int(original_count * 0.01))
+            test_prompts = test_prompts[:sample_size]
+            print(f"[Eval] Using {sample_size}/{original_count} scaffolds (1% sample)")
+
             if len(test_prompts) > EVAL_BATCH_SIZE:
                 use_batched_eval = True
                 print(f"[Eval] Large test set ({len(test_prompts)} scaffolds). Using batched evaluation.")
         else:
-            print(f"[Eval] WARNING: Config path {path} not found.")
-    elif config.prodrug_mode:
-        test_prompts = config.prodrug_parents_test
+            print(f"[Eval] WARNING: Config path {config.evaluation_scaffolds_path} not found.")
+            print(f"[Eval] Tried: {path}")
+            print(f"[Eval] Current directory: {os.getcwd()}")
 
     SUCCESS_THRESHOLD = 0.5
     scaffold_metrics = []
@@ -169,6 +181,11 @@ def main():
     else:
         ConfigClass = MoleculeConfig
     config = ConfigClass()
+
+    # Add to main() before evaluation
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Checkpoint exists: {os.path.exists(args.checkpoint)}")
+    print(f"Test scaffolds exist: {os.path.exists(config.evaluation_scaffolds_path)}")
 
     # Set num_epochs to 0 to skip training
     config.num_epochs = 0

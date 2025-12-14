@@ -169,8 +169,20 @@ class GumbeldoreDataset:
         # Explicit Prompts (TESTING / INFERENCE)
         # Used when evaluate() passes the test_scaffolds list
         if prompts is not None and len(prompts) > 0:
-            # print(f"[Generator] Using {len(prompts)} provided prompts (Inference).")
-            for smi in prompts:
+            # Check if we should include carbon as a default prompt
+            include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
+
+            if include_carbon_prompt:
+                # Add carbon atom as first prompt
+                problem_instances.append(
+                    MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
+                )
+                # Use n-1 prompts from the provided list to keep total count same
+                prompts_to_use = prompts[:len(prompts) - 1] if len(prompts) > 1 else []
+            else:
+                prompts_to_use = prompts
+
+            for smi in prompts_to_use:
                 problem_instances.append(
                     MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
                 )

@@ -136,7 +136,7 @@ class MoleculeConfig:
             "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
-            "beam_width": 128,
+            "beam_width": 128,  # 32
             "replan_steps": 12,
             # "num_rounds": 10,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
             "num_rounds": 1,  # if it's a tuple, then we sample as long as it takes to obtain a better trajectory, but for a minimum of first entry rounds and a maximum of second entry rounds
@@ -170,7 +170,7 @@ class MoleculeConfig:
         self.fragment_library_path = "scaffold_splitting/zinc_splits/run_seed_42/train_scaffolds.txt"  # Path to TRAINING scaffolds
         # self.fragment_library_path = "data/GDB13_Subset_ABCDEFG_filtered.txt"
         # Number of prompts (scaffolds) to sample per epoch
-        self.num_prompts_per_epoch = 32
+        self.num_prompts_per_epoch = 32  #10
 
         self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
