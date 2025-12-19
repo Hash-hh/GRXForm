@@ -131,7 +131,7 @@ class MoleculeConfig:
         # Self-improvement sequence decoding
         self.gumbeldore_config = {
             # Number of trajectories with the highest objective function evaluation to keep for training
-            "num_trajectories_to_keep": 10,
+            "num_trajectories_to_keep": 5,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cuda:"+target_gpu_id] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
