@@ -13,7 +13,7 @@ class KinaseMPOObjective:
     def score(self, smiles):
         """
         Returns the scalar reward for Reinforcement Learning (Sum of properties).
-        Range: roughly [0.0, 4.0]
+        Range: [0.0, 1.0]
         """
         if not smiles:
             return 0.0
