@@ -75,7 +75,8 @@ class MoleculeConfig:
         # self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
 
         # TDC objs
-        self.objective_type = "jnk3"
+        self.objective_type = "kinase_mpo"
+        # self.objective_type = "jnk3"
 
         # self.num_predictor_workers = 1  # num of parallel workers that operate on a given list of molecules
         self.num_predictor_workers = 10  # num of parallel workers that operate on a given list of molecules
@@ -133,7 +134,7 @@ class MoleculeConfig:
 
             "search_type": "wor",  # "beam_search" | "tasar" | "iid_mc", "wor"
             # "search_type": "tasar",
-            "num_samples_per_instance": 128,  # For 'iid_mc': number of IID samples to generate per starting instance
+            "num_samples_per_instance": 320,  # For 'iid_mc': number of IID samples to generate per starting instance
             "sampling_temperature": 1,  # For 'iid_mc': temperature for sampling. >1 is more random.
 
             "beam_width": 320,
@@ -197,7 +198,7 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        self.rl_replay_microbatch_size = 265  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
         # self.rl_replay_microbatch_size = 64  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)

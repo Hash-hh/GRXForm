@@ -14,9 +14,9 @@ from objective_predictor.GH_GNN_IDAC.src.models.utilities.mol2graph import get_d
 from objective_predictor.GH_GNN_IDAC.src.models.GHGNN_architecture import GHGNN
 from objective_predictor.Prodrug.bbb_obj import BBBObjective
 from objective_predictor.tdc.jnk import JNK3Objective
+from objective_predictor.tdc.kinase_mpo import KinaseMPOObjective
 
 from guacamol.benchmark_suites import goal_directed_suite_v2
-
 
 @ray.remote
 class PredictorWorker:
@@ -185,6 +185,9 @@ class MoleculeObjectiveEvaluator:
         if getattr(self.config, 'objective_type', '') == 'jnk3':
             self.jnk3_objective = JNK3Objective()
 
+        if getattr(self.config, 'objective_type', '') == 'kinase_mpo':
+            self.kinase_mpo_objective = KinaseMPOObjective()
+
         # initialize GuacaMol benchmarks
         guacamol_goal_directed_suite = goal_directed_suite_v2()
         self.guacamol_benchmarks = dict(
@@ -286,6 +289,12 @@ class MoleculeObjectiveEvaluator:
         elif getattr(self.config, 'objective_type', '') == 'jnk3':
             objs = np.array([
                 self.jnk3_objective.score(Chem.MolToSmiles(rdkit_mol))
+                for rdkit_mol in feasible_molecules
+            ])
+
+        elif getattr(self.config, 'objective_type', '') == 'kinase_mpo':
+            objs = np.array([
+                self.kinase_mpo_objective.score(Chem.MolToSmiles(rdkit_mol))
                 for rdkit_mol in feasible_molecules
             ])
 
