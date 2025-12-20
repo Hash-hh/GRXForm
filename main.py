@@ -741,17 +741,22 @@ if __name__ == '__main__':
                 # New Logic: Save based on Validation Mean Score
                 if current_val_mean_score > best_val_mean_score:
                     print(
-                        f">> New best VALIDATION score: {current_val_mean_score:.4f} (prev: {best_val_mean_score:.4f})")
+                        f">> New best VALIDATION score: {current_val_mean_score:.4f} (prev: {best_val_mean_score:.4f}). Saving new best model.")
                     best_val_mean_score = current_val_mean_score
                     checkpoint["best_validation_mean_score"] = best_val_mean_score
                     saved_new_best = True
             else:
                 # Old Logic: Save based on best single molecule seen in training
                 if val_metric > best_validation_metric:
-                    print(f">> New best TRAINING molecule found: {val_metric:.4f}")
+                    print(f">> New best TRAINING molecule found: {val_metric:.4f}. Saving new best model.")
                     best_validation_metric = val_metric
                     checkpoint["best_validation_metric"] = best_validation_metric
                     saved_new_best = True
+
+            if val_metric > best_validation_metric:
+                print(f">> New best TRAINING molecule found: {val_metric:.4f}")
+                best_validation_metric = val_metric
+                checkpoint["best_validation_metric"] = best_validation_metric
 
             if saved_new_best:
                 checkpoint["best_model_weights"] = copy.deepcopy(network.get_weights())
