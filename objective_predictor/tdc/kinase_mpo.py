@@ -54,7 +54,16 @@ class KinaseMPOObjective:
         qed = self.qed(smiles)
         sa = self.sa(smiles)
 
+        print(f"GSK3B: {gsk}, JNK3: {jnk}, QED: {qed}, SA: {sa}")
+
         # The hard thresholds defined in the benchmark paper
         return (gsk >= 0.5) and (jnk >= 0.5) and (qed >= 0.6) and (sa < 4.0)
         # except:
         #     return False
+
+if __name__ == "__main__":
+    objective = KinaseMPOObjective()
+    test_smiles = "Cc1cc(-c2ncncc2C[N+](C)(C)CC2CCC2)ccc1-c1ccnc(Nc2ccc(N3CCN(C)CC3)cc2)n1"
+    score = objective.score(test_smiles)
+    success = objective.is_successful(test_smiles)
+    print(f"Score: {score}, Successful: {success}")
