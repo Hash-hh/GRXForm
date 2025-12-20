@@ -77,17 +77,21 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
 
         # Instead of dropping non-finite (invalid) molecules, give them 0 reward
         if obj is None or not math.isfinite(obj):
-            # Treat invalid molecules as 0.0 reward so the agent learns to avoid them
-            nonfinite_dropped += 1
-            # We must verify we have history/log_probs to construct the record
-            if d.history and d.log_probs_history:
-                records.append(TrajectoryRecord(
-                    design=d,
-                    history=list(d.history),
-                    reward=0.0,  # PENALTY
-                    log_probs_history=list(d.log_probs_history)
-                ))
-            continue
+            if obj is None:
+                none_dropped += 1
+                continue
+            elif not math.isfinite(obj):
+                nonfinite_dropped += 1
+                # Treat invalid molecules as 0.0 reward so the agent learns to avoid them
+                # We must verify we have history/log_probs to construct the record
+                if d.history and d.log_probs_history:
+                    records.append(TrajectoryRecord(
+                        design=d,
+                        history=list(d.history),
+                        reward=0.0,  # PENALTY
+                        log_probs_history=list(d.log_probs_history)
+                    ))
+                continue
 
         # records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj)))
         records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj),

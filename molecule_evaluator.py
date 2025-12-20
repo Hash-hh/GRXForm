@@ -226,11 +226,13 @@ class MoleculeObjectiveEvaluator:
 
         for i, mol in enumerate(molecule_designs):
             if isinstance(mol, MoleculeDesign):
+                # print("Mol is a MoleculeDesign")
                 assert mol.synthesis_done
                 if not self.infeasible_by_special_constraints(mol):
                     feasible_idcs.append(i)
                     feasible_molecules.append(mol.rdkit_mol)
             elif mol != "C":
+                print("Mol is a SMILES string")
                 # is a string
                 try:
                     mol = Chem.MolFromSmiles(mol)
