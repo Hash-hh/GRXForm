@@ -80,13 +80,26 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     scores = []
     for group in grouped_results:
         if group and group[0].objective is not None:
-            scores.append(group[0].objective)
+            # Convert -inf to 0.0 for logging purposes
+            val_ = group[0].objective
+            if val_ == float("-inf"):
+                val_ = 0.0
+            scores.append(val_)
 
     if not scores:
         print("[Val] No valid molecules generated.")
         return float("-inf")
 
-    mean_val_score = np.mean(scores)
+    valid_scores = [s for s in scores if s > float("-inf")]
+
+    if not valid_scores:
+        print("[Val] All generated molecules were invalid (-inf).")
+        return float("-inf")
+    if len(valid_scores) < len(scores):
+        print(f"[Val] Warning: {len(scores) - len(valid_scores)} out of {len(scores)} molecules were invalid (-inf) and excluded from mean score calculation.")
+
+    mean_val_score = np.mean(valid_scores)
+
     print(f"[Val] Mean Score: {mean_val_score:.4f} (over {len(scores)} molecules)")
     return mean_val_score
 
