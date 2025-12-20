@@ -583,7 +583,7 @@ if __name__ == '__main__':
             # Plateau Check: Has RL found enough NEW molecules recently?
             if len(unique_calls_history) >= 10:
                 recent_new_calls = sum(unique_calls_history[-10:])
-                threshold = 10  # Check for fewer than 10 unique in last 10 epochs
+                threshold = config.gumbeldore_config["num_trajectories_to_keep"]  # Check for fewer than 10 unique in last 10 epochs
 
                 if recent_new_calls < threshold:
                     # print(

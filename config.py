@@ -101,7 +101,7 @@ class MoleculeConfig:
         self.CUDA_VISIBLE_DEVICES = target_gpu_id  # Must be set, as ray can have problems detecting multiple GPUs
         # self.CUDA_VISIBLE_DEVICES = "0"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cuda:" + target_gpu_id  # Device on which to perform the supervised training
-        self.num_epochs = 3000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 4000  # Number of epochs (i.e., passes through training set) to train
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
