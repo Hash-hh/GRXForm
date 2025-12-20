@@ -68,6 +68,7 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     # Generate
     # return_raw_trajectories=True returns List[List[MoleculeDesign]]
     # Since beam_width=1, inner list has size 1.
+
     grouped_results = dataset.generate_dataset(
         network_weights=copy.deepcopy(network.get_weights()),
         memory_aggressive=False,
