@@ -181,7 +181,7 @@ class MoleculeConfig:
         self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
-        self.use_validation_for_ckpt = True  # If True, saves best_model.pt based on val_scaffolds mean score
+        self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
 
         # K: Number of completions per prompt is already set by:
         # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)

@@ -63,7 +63,8 @@ class KinaseMPOObjective:
 
 if __name__ == "__main__":
     objective = KinaseMPOObjective()
-    test_smiles = "Cc1cc(-c2ncncc2C[N+](C)(C)CC2CCC2)ccc1-c1ccnc(Nc2ccc(N3CCN(C)CC3)cc2)n1"
+    test_smiles = "COc1ccc(-c2ccnc(Nc3ccccc3)n2)cn1"
+    # test_smiles = "Cc1cc(-c2ncncc2C[N+](C)(C)CC2CCC2)ccc1-c1ccnc(Nc2ccc(N3CCN(C)CC3)cc2)n1"
     score = objective.score(test_smiles)
     success = objective.is_successful(test_smiles)
     print(f"Score: {score}, Successful: {success}")

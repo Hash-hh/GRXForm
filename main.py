@@ -705,7 +705,6 @@ if __name__ == '__main__':
                 )
                 val_metric = generated_loggable_dict["best_gen_obj"]
 
-
             # --- [NEW] VALIDATION STEP ---
             current_val_mean_score = float("-inf")
             if config.use_validation_for_ckpt and not config.prodrug_mode:
