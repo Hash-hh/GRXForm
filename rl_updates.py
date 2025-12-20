@@ -93,7 +93,6 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
                         log_probs_history=list(d.log_probs_history)
                     ))
                 continue
-
         # records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj)))
         records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj),
                                         log_probs_history=list(d.log_probs_history)))
