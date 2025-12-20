@@ -136,8 +136,7 @@ class GumbeldoreDataset:
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False,
                          prompts: Optional[List[str]] = None,
-                         return_raw_trajectories: bool = False,
-                         mode: str = "eval"
+                         return_raw_trajectories: bool = False
                          ):
         """
         Parameters:
@@ -169,7 +168,8 @@ class GumbeldoreDataset:
 
         # Explicit Prompts (TESTING / INFERENCE)
         # Used when evaluate() passes the test_scaffolds list
-        if prompts is not None and len(prompts) > 0:
+        if prompts is not None and len(prompts) > 0 and not is_prodrug_mode:
+            print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prompts for generation.")
             for smi in prompts:
                 problem_instances.append(
                     MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
@@ -193,13 +193,13 @@ class GumbeldoreDataset:
             if n_prompts > len(self.fragment_library):
                 sampled = random.sample(self.fragment_library, len(self.fragment_library))
             else:
-                print(f"Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
+                print(f"[GumbeldoreDataset] Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
                 include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
                 if include_carbon_prompt:
                     sampled = random.sample(self.fragment_library, n_prompts-1)
                     sampled.append('C')
                 else:
-                    print(f"Sampling {n_prompts} from library.")
+                    print(f"[Gumbeldoredataset] Sampling {n_prompts} from library.")
                     sampled = random.sample(self.fragment_library, n_prompts)
 
             # print(f"[Generator] Sampling {len(sampled)} scaffolds for training.")

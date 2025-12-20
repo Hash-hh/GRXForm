@@ -104,7 +104,7 @@ def train_for_one_epoch_supervised(epoch: int,
     metrics = gumbeldore_dataset.generate_dataset(
         network_weights,
         best_objective=best_objective,
-        memory_aggressive=False, mode="train"
+        memory_aggressive=False
     )
     print("Generated molecules")
     print(f"Mean obj. over fresh best mols: {metrics['mean_best_gen_obj']:.3f}")
