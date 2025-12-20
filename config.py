@@ -56,7 +56,7 @@ class MoleculeConfig:
         #     "O": {"allowed": True, "atomic_number": 8, "valence": 2}
         # }
 
-        self. start_from_c_chains= True
+        self.start_from_c_chains= True
         self.start_c_chain_max_len = 1
         self.start_from_smiles = None  # Give SMILES and set `start_from_c_chains=False`.
         self.repeat_start_instances = 1
@@ -75,6 +75,7 @@ class MoleculeConfig:
         # self.objective_type = "prodrug_bbb"  # either "IBA" or "DMBA_TMB" for solvent design, or goal-directed task from GuacaMol (see README)
 
         # Objs (jnk3, kinase_mpo, prodrug_bbb)
+        # self.objective_type = "prodrug_bbb"
         self.objective_type = "kinase_mpo"
         # self.objective_type = "jnk3"
 

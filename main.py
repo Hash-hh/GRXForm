@@ -695,7 +695,7 @@ if __name__ == '__main__':
 
             # --- [NEW] VALIDATION STEP ---
             current_val_mean_score = float("-inf")
-            if config.use_validation_for_ckpt:
+            if config.use_validation_for_ckpt and not config.prodrug_mode:
                 current_val_mean_score = validate_epoch(config, network, objective_eval)
                 generated_loggable_dict["validation_mean_score"] = current_val_mean_score
             # -----------------------------
@@ -724,7 +724,7 @@ if __name__ == '__main__':
             # --- CHECKPOINT SAVING LOGIC ---
             saved_new_best = False
 
-            if config.use_validation_for_ckpt:
+            if config.use_validation_for_ckpt and not config.prodrug_mode:
                 # New Logic: Save based on Validation Mean Score
                 if current_val_mean_score > best_val_mean_score:
                     print(
@@ -757,7 +757,7 @@ if __name__ == '__main__':
                     "learning_rate": scheduler.get_last_lr()[0]
                 }
 
-                if config.use_validation_for_ckpt:
+                if config.use_validation_for_ckpt and not config.prodrug_mode:
                     wandb_log["validation_mean_score"] = current_val_mean_score
                     wandb_log["best_validation_mean_score"] = best_val_mean_score
 
