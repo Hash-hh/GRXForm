@@ -129,6 +129,11 @@ class MoleculeDesign(BaseTrajectory):
             self.current_action_mask = np.zeros(len(self.vocabulary_atom_idcs) + len(self.atoms), dtype=bool)  # <terminate><create new and pick><pick existing>
             # Termination is always allowed. So we won't change that.
 
+            # UNLESS ...
+            # Forbid termination if we only have the initial atom (Virtual + 1 Real = 2 atoms)
+            if len(self.atoms) <= 2:
+                self.current_action_mask[0] = 1
+
             # --> First of all, check if we can create a new atom.
             # In principle only allow creating new atoms of types which can be chosen by the config
             # (where `allowed` is set to True)

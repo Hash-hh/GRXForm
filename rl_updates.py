@@ -67,17 +67,37 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
         # if not (d.history[-1] == 0 and d.synthesis_done):
         #     continue
         obj = d.objective
-        if obj is None:
-            none_dropped += 1
-            continue
-        if not math.isfinite(obj):
-            nonfinite_dropped += 1
-            continue
+
+        # if obj is None:
+        #     none_dropped += 1
+        #     continue
+        # if not math.isfinite(obj):
+        #     nonfinite_dropped += 1
+        #     continue
+
+        # Instead of dropping non-finite (invalid) molecules, give them 0 reward
+        if obj is None or not math.isfinite(obj):
+            if obj is None:
+                none_dropped += 1
+                continue
+            elif not math.isfinite(obj):
+                print("Smiles with non-finite objective:", d.smiles_string, "objective:", obj)
+                nonfinite_dropped += 1
+                # Treat invalid molecules as 0.0 reward so the agent learns to avoid them
+                # We must verify we have history/log_probs to construct the record
+                if d.history and d.log_probs_history:
+                    records.append(TrajectoryRecord(
+                        design=d,
+                        history=list(d.history),
+                        reward=0.0,  # PENALTY
+                        log_probs_history=list(d.log_probs_history)
+                    ))
+                continue
         # records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj)))
         records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj),
                                         log_probs_history=list(d.log_probs_history)))
-    if none_dropped or nonfinite_dropped:
-        print(f"[DR-GRPO] filter: dropped none={none_dropped} nonfinite={nonfinite_dropped} kept={len(records)}")
+    # if none_dropped or nonfinite_dropped:
+    print(f"[DR-GRPO] filter: dropped none={none_dropped} nonfinite={nonfinite_dropped} kept={len(records)}")
     return records, none_dropped, nonfinite_dropped
 
 
