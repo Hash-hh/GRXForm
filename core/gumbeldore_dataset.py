@@ -136,7 +136,8 @@ class GumbeldoreDataset:
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False,
                          prompts: Optional[List[str]] = None,
-                         return_raw_trajectories: bool = False
+                         return_raw_trajectories: bool = False,
+                         mode: str = "eval"
                          ):
         """
         Parameters:
@@ -176,10 +177,23 @@ class GumbeldoreDataset:
                 )
 
         # Prodrug Mode (Training)
-        elif is_prodrug_mode:
+        elif is_prodrug_mode and mode=="train":
+            include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
             target_smiles = getattr(self.config, 'prodrug_parents_train', [])
             if not target_smiles: raise ValueError("Prodrug mode enabled but no parents found.")
             for smi in target_smiles:
+                problem_instances.append(
+                    MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
+                )
+            if include_carbon_prompt:
+                print(f"[GumbeldoreDataset] Including carbon prompt in Prodrug training mode.")
+                problem_instances.append(
+                    MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
+                )
+
+        elif is_prodrug_mode and mode=="eval":
+            print(f"[GumbeldoreDataset] Using {len(prompts)} explicit prodrug parent test groups for generation.")
+            for smi in prompts:
                 problem_instances.append(
                     MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
                 )

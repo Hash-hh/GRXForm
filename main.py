@@ -73,7 +73,8 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
         network_weights=copy.deepcopy(network.get_weights()),
         memory_aggressive=False,
         prompts=val_scaffolds,
-        return_raw_trajectories=True
+        return_raw_trajectories=True,
+        mode="eval"
     )
 
     scores = []
@@ -105,7 +106,8 @@ def train_for_one_epoch_supervised(epoch: int,
     metrics = gumbeldore_dataset.generate_dataset(
         network_weights,
         best_objective=best_objective,
-        memory_aggressive=False
+        memory_aggressive=False,
+        mode="train"
     )
     print("Generated molecules")
     print(f"Mean obj. over fresh best mols: {metrics['mean_best_gen_obj']:.3f}")
@@ -222,7 +224,8 @@ def train_for_one_epoch_rl(epoch: int,
         network_weights=network_weights,
         best_objective=None,
         memory_aggressive=False,
-        prompts=current_prompts
+        prompts=current_prompts,
+        mode="train"
     )
 
     if not trajectories or not any(trajectories):
@@ -372,7 +375,8 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
                 copy.deepcopy(network.get_weights()),
                 memory_aggressive=False,
                 prompts=batch_prompts,
-                return_raw_trajectories=True
+                return_raw_trajectories=True,
+                mode="eval"
             )
 
             # Process batch results
@@ -404,7 +408,8 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
             copy.deepcopy(network.get_weights()),
             memory_aggressive=False,
             prompts=test_prompts,
-            return_raw_trajectories=True
+            return_raw_trajectories=True,
+            mode="eval"
         )
 
         for group in grouped_trajectories:
