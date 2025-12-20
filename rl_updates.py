@@ -81,6 +81,7 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
                 none_dropped += 1
                 continue
             elif not math.isfinite(obj):
+                print("Smiles with non-finite objective:", d.smiles_string, "objective:", obj)
                 nonfinite_dropped += 1
                 # Treat invalid molecules as 0.0 reward so the agent learns to avoid them
                 # We must verify we have history/log_probs to construct the record
