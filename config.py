@@ -174,6 +174,8 @@ class MoleculeConfig:
         # Number of prompts (scaffolds) to sample per epoch
         self.num_prompts_per_epoch = 10
 
+        self.include_carbon_prompt = True
+
         self.evaluation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/test_scaffolds.txt"  # can use test_scaffolds_small for quick testing
         self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation

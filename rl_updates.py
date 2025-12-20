@@ -76,8 +76,8 @@ def filter_and_build_records(designs: List[MoleculeDesign]) -> (List[TrajectoryR
         # records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj)))
         records.append(TrajectoryRecord(design=d, history=list(d.history), reward=float(obj),
                                         log_probs_history=list(d.log_probs_history)))
-    if none_dropped or nonfinite_dropped:
-        print(f"[DR-GRPO] filter: dropped none={none_dropped} nonfinite={nonfinite_dropped} kept={len(records)}")
+    # if none_dropped or nonfinite_dropped:
+    print(f"[DR-GRPO] filter: dropped none={none_dropped} nonfinite={nonfinite_dropped} kept={len(records)}")
     return records, none_dropped, nonfinite_dropped
 
 
@@ -363,6 +363,10 @@ def dr_grpo_update(model: MoleculeTransformer,
     aux_metrics_sum = {}
     aux_metrics_count = 0
 
+    # # print length of each group:
+    # for i, group in enumerate(designs_groups):
+    #     print(f"Group {i} length: {len(group)}")
+
     print(f"[GRPO] Received {len(designs_groups)} groups for update.")
 
     for i, group in enumerate(designs_groups):
@@ -448,7 +452,7 @@ def dr_grpo_update(model: MoleculeTransformer,
     # Calculate the mean of the *group baselines* for logging
     mean_baseline = sum(all_baselines) / len(all_baselines) if all_baselines else 0.0
 
-
+    # print("num_trajectories:", len(all_records_flat))
     metrics = {
         "baseline": mean_baseline,
         "mean_reward": float(mean_reward),
