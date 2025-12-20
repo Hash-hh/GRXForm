@@ -136,7 +136,8 @@ class GumbeldoreDataset:
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None,
                          memory_aggressive: bool = False,
                          prompts: Optional[List[str]] = None,
-                         return_raw_trajectories: bool = False
+                         return_raw_trajectories: bool = False,
+                         mode: str = "eval"
                          ):
         """
         Parameters:
@@ -169,20 +170,7 @@ class GumbeldoreDataset:
         # Explicit Prompts (TESTING / INFERENCE)
         # Used when evaluate() passes the test_scaffolds list
         if prompts is not None and len(prompts) > 0:
-            # Check if we should include carbon as a default prompt
-            include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
-
-            if include_carbon_prompt:
-                # Add carbon atom as first prompt
-                problem_instances.append(
-                    MoleculeDesign.from_smiles(self.config, 'C', do_finish=False)
-                )
-                # Use n-1 prompts from the provided list to keep total count same
-                prompts_to_use = prompts[:len(prompts) - 1] if len(prompts) > 1 else []
-            else:
-                prompts_to_use = prompts
-
-            for smi in prompts_to_use:
+            for smi in prompts:
                 problem_instances.append(
                     MoleculeDesign.from_smiles(self.config, smi, do_finish=False)
                 )
@@ -205,7 +193,14 @@ class GumbeldoreDataset:
             if n_prompts > len(self.fragment_library):
                 sampled = random.sample(self.fragment_library, len(self.fragment_library))
             else:
-                sampled = random.sample(self.fragment_library, n_prompts)
+                print(f"Including carbon prompt in scaffold sampling. Sampling {n_prompts-1} from library.")
+                include_carbon_prompt = getattr(self.config, 'include_carbon_prompt', True)
+                if include_carbon_prompt:
+                    sampled = random.sample(self.fragment_library, n_prompts-1)
+                    sampled.append('C')
+                else:
+                    print(f"Sampling {n_prompts} from library.")
+                    sampled = random.sample(self.fragment_library, n_prompts)
 
             # print(f"[Generator] Sampling {len(sampled)} scaffolds for training.")
             for smi in sampled:

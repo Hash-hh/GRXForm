@@ -32,6 +32,62 @@ def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     path = os.path.join(config.results_path, filename)
     torch.save(checkpoint, path)
 
+
+def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
+                   objective_evaluator: MoleculeObjectiveEvaluator):
+    """
+    Runs deterministic validation on the scaffolds defined in config.validation_scaffolds_path.
+    Returns the mean objective score.
+    """
+    val_path = getattr(config, 'validation_scaffolds_path', None)
+    if not val_path or not os.path.exists(val_path):
+        print(f"[Val] Validation path not found or not set: {val_path}")
+        return float("-inf")
+
+    # Load Scaffolds
+    with open(val_path, 'r') as f:
+        val_scaffolds = [line.strip() for line in f if line.strip()]
+
+    if not val_scaffolds:
+        print("[Val] Validation file empty.")
+        return float("-inf")
+
+    # Create a clean config for Greedy/Deterministic Search
+    # We clone to avoid messing up the main training config
+    val_config = copy.deepcopy(config)
+    val_config.gumbeldore_config["search_type"] = "beam_search"
+    val_config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
+    val_config.gumbeldore_config["deterministic"] = True  # Deterministic transition
+    val_config.gumbeldore_config["num_trajectories_to_keep"] = 1
+    val_config.gumbeldore_config["destination_path"] = None  # Don't save to disk
+
+    dataset = GumbeldoreDataset(config=val_config, objective_evaluator=objective_evaluator)
+
+    print(f"[Val] Validating on {len(val_scaffolds)} scaffolds (Greedy Decoding)...")
+
+    # Generate
+    # return_raw_trajectories=True returns List[List[MoleculeDesign]]
+    # Since beam_width=1, inner list has size 1.
+    grouped_results = dataset.generate_dataset(
+        network_weights=copy.deepcopy(network.get_weights()),
+        memory_aggressive=False,
+        prompts=val_scaffolds,
+        return_raw_trajectories=True
+    )
+
+    scores = []
+    for group in grouped_results:
+        if group and group[0].objective is not None:
+            scores.append(group[0].objective)
+
+    if not scores:
+        print("[Val] No valid molecules generated.")
+        return float("-inf")
+
+    mean_val_score = np.mean(scores)
+    print(f"[Val] Mean Score: {mean_val_score:.4f} (over {len(scores)} molecules)")
+    return mean_val_score
+
 def train_for_one_epoch_supervised(epoch: int,
                                    config: MoleculeConfig,
                                    network: MoleculeTransformer,
@@ -48,7 +104,7 @@ def train_for_one_epoch_supervised(epoch: int,
     metrics = gumbeldore_dataset.generate_dataset(
         network_weights,
         best_objective=best_objective,
-        memory_aggressive=False
+        memory_aggressive=False, mode="train"
     )
     print("Generated molecules")
     print(f"Mean obj. over fresh best mols: {metrics['mean_best_gen_obj']:.3f}")
@@ -557,10 +613,15 @@ if __name__ == '__main__':
             "optimizer_state": None,
             "epochs_trained": 0,
             "validation_metric": float("-inf"),
-            "best_validation_metric": float("-inf")
+            "best_validation_metric": float("-inf"),
+            "best_validation_mean_score": float("-inf")
         }
     if checkpoint["model_weights"] is not None:
         network.load_state_dict(checkpoint["model_weights"])
+
+    # Init new best_validation_mean_score if loading old checkpoint
+    if "best_validation_mean_score" not in checkpoint:
+        checkpoint["best_validation_mean_score"] = float("-inf")
 
     print(f"Policy network is on device {config.training_device}")
     network.to(network.device)
@@ -571,6 +632,7 @@ if __name__ == '__main__':
 
         best_model_weights = checkpoint["best_model_weights"]
         best_validation_metric = checkpoint["best_validation_metric"]
+        best_val_mean_score = checkpoint["best_validation_mean_score"]
 
         print("Setting up optimizer.")
         optimizer = torch.optim.Adam(
@@ -624,6 +686,14 @@ if __name__ == '__main__':
                 )
                 val_metric = generated_loggable_dict["best_gen_obj"]
 
+
+            # --- [NEW] VALIDATION STEP ---
+            current_val_mean_score = float("-inf")
+            if config.use_validation_for_ckpt:
+                current_val_mean_score = validate_epoch(config, network, objective_eval)
+                generated_loggable_dict["validation_mean_score"] = current_val_mean_score
+            # -----------------------------
+
             # Update all-time top-K SMILES archive
             try:
                 if rl_mode_active:  # top20_text is a list of strings
@@ -645,13 +715,29 @@ if __name__ == '__main__':
 
             logger.log_metrics(generated_loggable_dict, step=epoch)
 
-            # First, update the overall best metric
-            if val_metric > best_validation_metric:
-                print(">> Got new best model.")
-                best_validation_metric = val_metric
+            # --- CHECKPOINT SAVING LOGIC ---
+            saved_new_best = False
+
+            if config.use_validation_for_ckpt:
+                # New Logic: Save based on Validation Mean Score
+                if current_val_mean_score > best_val_mean_score:
+                    print(
+                        f">> New best VALIDATION score: {current_val_mean_score:.4f} (prev: {best_val_mean_score:.4f})")
+                    best_val_mean_score = current_val_mean_score
+                    checkpoint["best_validation_mean_score"] = best_val_mean_score
+                    saved_new_best = True
+            else:
+                # Old Logic: Save based on best single molecule seen in training
+                if val_metric > best_validation_metric:
+                    print(f">> New best TRAINING molecule found: {val_metric:.4f}")
+                    best_validation_metric = val_metric
+                    checkpoint["best_validation_metric"] = best_validation_metric
+                    saved_new_best = True
+
+            if saved_new_best:
                 checkpoint["best_model_weights"] = copy.deepcopy(network.get_weights())
-                checkpoint["best_validation_metric"] = best_validation_metric
                 save_checkpoint(checkpoint, "best_model.pt", config)
+            # -------------------------------
 
             # WandB logging
             if hasattr(config, 'use_wandb') and config.use_wandb:
@@ -664,6 +750,11 @@ if __name__ == '__main__':
                     "mean_top_20_all_time_obj": generated_loggable_dict.get("mean_top_20_obj"),
                     "learning_rate": scheduler.get_last_lr()[0]
                 }
+
+                if config.use_validation_for_ckpt:
+                    wandb_log["validation_mean_score"] = current_val_mean_score
+                    wandb_log["best_validation_mean_score"] = best_val_mean_score
+
                 # Add specific RL metrics if in RL mode
                 if rl_mode_active:
                     # Define the specific list of metrics you want to log from the RL update
