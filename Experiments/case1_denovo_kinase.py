@@ -1,6 +1,11 @@
 from config import MoleculeConfig as BaseConfig
 
 class MoleculeConfig(BaseConfig):
+    """
+    Scenario A: Case 1 (De Novo Training)
+    Train on "C", ignore scaffolds. Test on Scaffolds to see if it generalizes.
+    """
+
     def __init__(self):
         super().__init__()
 
@@ -18,6 +23,17 @@ class MoleculeConfig(BaseConfig):
         # --- RL METHOD ---
         self.use_dr_grpo = True
         self.use_grpo_grouping = True  # Standard GRPO
+
+        # sampling parameters
+        self.gumbeldore_config["beam_width"] = 320
+        self.num_prompts_per_epoch = 1
+        self.fixed_test_beam_width = 22
+        self.num_epochs = 500
+
+        # seed
+        seed = 42
+        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
+        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/val_scaffolds.txt"
 
         # --- WandB Logging ---
         self.seed = 42

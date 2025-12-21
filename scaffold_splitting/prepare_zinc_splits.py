@@ -11,8 +11,8 @@ OUTPUT_DIR = "zinc_splits"
 SEEDS = [42, 43, 44]
 
 # --- SPLIT CONFIGURATION ---
-TRAIN_RATIO = 0.8
-NUM_VAL_SCAFFOLDS = 100  # Stolen from the Test set
+NUM_VAL_SCAFFOLDS = 100  # Fixed number for validation
+NUM_TEST_SCAFFOLDS = NUM_VAL_SCAFFOLDS * 5  # 500 for test
 
 
 def get_scaffold(smiles):
@@ -69,8 +69,9 @@ def main():
     scaffolds = list(scaffold_to_molecules.keys())
     print(f"Found {len(scaffolds)} unique scaffolds.")
 
-    if len(scaffolds) * (1 - TRAIN_RATIO) < NUM_VAL_SCAFFOLDS:
-        print("Error: Test set is too small to extract 100 validation scaffolds!")
+    # Global check to ensure we have enough scaffolds for at least Val + Test
+    if len(scaffolds) < NUM_VAL_SCAFFOLDS + NUM_TEST_SCAFFOLDS:
+        print(f"Error: Total scaffolds ({len(scaffolds)}) is less than required for Val+Test ({NUM_VAL_SCAFFOLDS + NUM_TEST_SCAFFOLDS})!")
         return
 
     # Step 3: Generate splits for each seed
@@ -84,18 +85,12 @@ def main():
         shuffled_scaffolds = scaffolds.copy()
         random.shuffle(shuffled_scaffolds)
 
-        # 1. Initial 80/20 Split
-        split_idx = int(len(shuffled_scaffolds) * TRAIN_RATIO)
-        train_scaffolds = shuffled_scaffolds[:split_idx]
-        test_pool = shuffled_scaffolds[split_idx:]
+        # 1. Extract Validation and Test first (fixed sizes)
+        val_scaffolds = shuffled_scaffolds[:NUM_VAL_SCAFFOLDS]
+        test_scaffolds = shuffled_scaffolds[NUM_VAL_SCAFFOLDS:NUM_VAL_SCAFFOLDS + NUM_TEST_SCAFFOLDS]
 
-        # 2. Extract Validation from the Test Pool
-        # We take the first 100 scaffolds from the pool for Validation
-        val_scaffolds = test_pool[:NUM_VAL_SCAFFOLDS]
-
-        # 3. Finalize Test Set
-        # The remainder of the pool becomes the actual Test set
-        test_scaffolds = test_pool[NUM_VAL_SCAFFOLDS:]
+        # 2. Everything else goes to training
+        train_scaffolds = shuffled_scaffolds[NUM_VAL_SCAFFOLDS + NUM_TEST_SCAFFOLDS:]
 
         # Helper to collect molecules
         def get_mols(scaffold_list):
@@ -131,31 +126,22 @@ def main():
         # --- ADDED STATS LOGGING ---
         def get_atom_stats(scaff_list):
             if not scaff_list: return 0.0, 0, 0
-            # GetNumAtoms() returns heavy atoms for implicit-H SMILES
             sizes = [Chem.MolFromSmiles(s).GetNumAtoms() for s in scaff_list if Chem.MolFromSmiles(s)]
             if not sizes: return 0.0, 0, 0
             return sum(sizes) / len(sizes), min(sizes), max(sizes)
 
         print(f"  [Saved to {run_dir}]")
-        print(f"  Train: {len(train_scaffolds)} scaffolds (80%)")
-        print(f"  Val:   {len(val_scaffolds)} scaffolds (Fixed 100 from Test Pool)")
-        print(f"  Test:  {len(test_scaffolds)} scaffolds (Remainder of Test Pool)")
+        print(f"  Train: {len(train_scaffolds)} scaffolds (Remaining)")
+        print(f"  Val:   {len(val_scaffolds)} scaffolds (Fixed)")
+        print(f"  Test:  {len(test_scaffolds)} scaffolds (Fixed)")
 
         train_avg, train_min, train_max = get_atom_stats(train_scaffolds)
         val_avg, val_min, val_max = get_atom_stats(val_scaffolds)
         test_avg, test_min, test_max = get_atom_stats(test_scaffolds)
 
         print(f"  Avg Atoms Train Scaffolds: {train_avg:.2f}")
-        print(f"  Min Atoms Train Scaffolds: {train_min}")
-        print(f"  Max Atoms Train Scaffolds: {train_max}")
-
         print(f"  Avg Atoms Val Scaffolds:   {val_avg:.2f}")
-        print(f"  Min Atoms Val Scaffolds:   {val_min}")
-        print(f"  Max Atoms Val Scaffolds:   {val_max}")
-
         print(f"  Avg Atoms Test Scaffolds:  {test_avg:.2f}")
-        print(f"  Min Atoms Test Scaffolds:  {test_min}")
-        print(f"  Max Atoms Test Scaffolds:  {test_max}")
 
     print("\nDone!")
 

@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import pickle
+import csv
 
 from logger import Logger
 from molecule_dataset import RandomMoleculeDataset
@@ -314,167 +315,156 @@ def train_for_one_epoch_rl(epoch: int,
 
     return metrics, top_20_text_lines
 
+
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
     """
-    Uses generation (supervised-style metrics) for evaluation irrespective of RL training.
-    If a fragment library is used (Scaffold Decoration), it attempts to load
-    the corresponding 'test_scaffolds.txt' to perform zero-shot evaluation.
-    Processes large test sets in batches to avoid OOM.
+    Evaluates the model on test scaffolds one-by-one.
+    Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
     """
-    config = copy.deepcopy(config)
-    config.gumbeldore_config["destination_path"] = None
+    # 1. Load Scaffolds
+    test_prompts = []
 
-    gumbeldore_dataset = GumbeldoreDataset(
-        config=config, objective_evaluator=objective_evaluator
-    )
+    # Priority A: Check explicit path in config
+    path = getattr(config, 'evaluation_scaffolds_path', None)
+    if path and os.path.exists(path):
+        print(f"[{eval_type}] Loading Scaffolds from: {path}")
+        with open(path, 'r') as f:
+            test_prompts = [line.strip() for line in f if line.strip()]
 
-    test_prompts = None
-    use_batched_eval = False
-    EVAL_BATCH_SIZE = 500  # Process scaffolds in batches of 500
-
-    # Check if a specific TEST file is defined in config
-    if getattr(config, 'evaluation_scaffolds_path', None):
-        path = config.evaluation_scaffolds_path
-        if os.path.exists(path):
-            print(f"[Eval] Loading Test Scaffolds from: {path}")
-            with open(path, 'r') as f:
-                test_prompts = [line.strip() for line in f if line.strip()]
-
-            # Use only 1% of scaffolds to avoid memory issues
-            original_count = len(test_prompts)
-            sample_size = max(1, int(original_count * 0.01))  # 1%
-            test_prompts = test_prompts[:sample_size]
-            print(f"[Eval] Using {sample_size}/{original_count} scaffolds (0.1% sample)")
-
-            # Optional: Subset for speed during training checks
-            if eval_type != 'test':
-                test_prompts = test_prompts[:32]
-                print(f"[Eval] Non-test mode: further limited to {len(test_prompts)} scaffolds")
-
-            # Enable batched evaluation for large test sets
-            if len(test_prompts) > EVAL_BATCH_SIZE:
-                use_batched_eval = True
-                print(f"[Eval] Large test set ({len(test_prompts)} scaffolds). Using batched evaluation.")
-        else:
-            print(f"[Eval] WARNING: Config path {path} not found.")
-
-    # If no path, check Prodrug mode
+    # Priority B: Check Prodrug mode
     elif config.prodrug_mode:
-        test_prompts = config.prodrug_parents_test
-        print(f"[Eval] Using {len(test_prompts)} prodrug parent scaffolds for evaluation")
-
-    # If no path, check Prodrug mode
-    elif config.prodrug_mode:
+        print(f"[{eval_type}] Using Prodrug test parents.")
         test_prompts = config.prodrug_parents_test
 
-    # Parameters for "Success"
+    if not test_prompts:
+        print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
+        return {}, ["No scaffolds found"]
+
+    print(f"[{eval_type}] Found {len(test_prompts)} scaffolds. Processing one by one...")
+
+    # 2. Setup Config for Evaluation
+    eval_config = copy.deepcopy(config)
+    eval_config.gumbeldore_config["destination_path"] = None  # Disable internal pickling
+
+    # Create the CSV Log File
+    os.makedirs(config.results_path, exist_ok=True)
+    csv_filename = f"{eval_type}_detailed_logs.csv"
+    csv_path = os.path.join(config.results_path, csv_filename)
+    print(f"[{eval_type}] saving detailed logs to: {csv_path}")
+
+    if getattr(eval_config, 'fixed_test_beam_width', None) is not None:
+        eval_config.gumbeldore_config["beam_width"] = eval_config.fixed_test_beam_width
+
+    print(f"[{eval_type}] using beam width:", eval_config.gumbeldore_config["beam_width"])
+
+    dataset = GumbeldoreDataset(config=eval_config, objective_evaluator=objective_evaluator)
+    weights = copy.deepcopy(network.get_weights())
+
+    all_valid_mols = []
+    scaffold_metrics = []
     SUCCESS_THRESHOLD = 0.5
 
-    scaffold_metrics = []
-    all_valid_mols = []
+    # 3. Open CSV and Start Loop
+    # We use 'w' mode to overwrite if restarting, or 'a' could be used if careful.
+    with open(csv_path, mode='w', newline='') as csv_file:
+        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_valid']
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
 
-    if use_batched_eval and test_prompts is not None:
-        # --- BATCHED EVALUATION ---
-        num_batches = (len(test_prompts) + EVAL_BATCH_SIZE - 1) // EVAL_BATCH_SIZE
-        print(f"[Eval] Processing {len(test_prompts)} scaffolds in {num_batches} batches...")
+        for idx, prompt in tqdm(enumerate(test_prompts), total=len(test_prompts), desc=f"Evaluating ({eval_type})"):
 
-        for batch_idx in tqdm(range(num_batches), desc="Eval Batches"):
-            start_idx = batch_idx * EVAL_BATCH_SIZE
-            end_idx = min(start_idx + EVAL_BATCH_SIZE, len(test_prompts))
-            batch_prompts = test_prompts[start_idx:end_idx]
-
-            # Generate for this batch
-            grouped_trajectories = gumbeldore_dataset.generate_dataset(
-                copy.deepcopy(network.get_weights()),
+            # Generate K candidates for this SINGLE prompt
+            grouped_results = dataset.generate_dataset(
+                network_weights=weights,
                 memory_aggressive=False,
-                prompts=batch_prompts,
+                prompts=[prompt],
                 return_raw_trajectories=True,
                 mode="eval"
             )
 
-            # Process batch results
-            for group in grouped_trajectories:
-                if not group:
-                    continue
-                objs = [m.objective for m in group if m.objective is not None]
-                valid_mols = [m for m in group if m.objective is not None]
-                all_valid_mols.extend(valid_mols)
-
-                if not objs:
-                    scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
-                    continue
-
-                best_score = max(objs)
-                mean_score = np.mean(objs)
-                is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
-                scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
-
-            # Clear memory between batches
-            del grouped_trajectories
-            torch.cuda.empty_cache()
-            import gc
-            gc.collect()
-
-    else:
-        # --- ORIGINAL NON-BATCHED PATH ---
-        grouped_trajectories = gumbeldore_dataset.generate_dataset(
-            copy.deepcopy(network.get_weights()),
-            memory_aggressive=False,
-            prompts=test_prompts,
-            return_raw_trajectories=True,
-            mode="eval"
-        )
-
-        for group in grouped_trajectories:
-            if not group:
-                continue
-            objs = [m.objective for m in group if m.objective is not None]
-            valid_mols = [m for m in group if m.objective is not None]
-            all_valid_mols.extend(valid_mols)
-
-            if not objs:
+            # Check if generation returned anything
+            if not grouped_results or not grouped_results[0]:
+                # Log failure in CSV
+                writer.writerow({
+                    'scaffold_idx': idx,
+                    'prompt_smiles': prompt,
+                    'generated_smiles': "GENERATION_FAILED",
+                    'objective_score': 0.0,
+                    'is_valid': False
+                })
                 scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
                 continue
 
-            best_score = max(objs)
-            mean_score = np.mean(objs)
-            is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
-            scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
+            group = grouped_results[0]  # List of MoleculeDesign objects
 
-    # --- AGGREGATION ---
+            # --- Detailed Logging to CSV ---
+            current_objs = []
+
+            for mol in group:
+                obj_val = mol.objective if mol.objective is not None else float("-inf")
+                smi = mol.smiles_string if mol.smiles_string else ""
+
+                # Write EVERY beam to the CSV
+                writer.writerow({
+                    'scaffold_idx': idx,
+                    'prompt_smiles': prompt,
+                    'generated_smiles': smi,
+                    'objective_score': obj_val if obj_val > float("-inf") else 0.0,
+                    'is_valid': (mol.objective is not None)
+                })
+
+                if mol.objective is not None:
+                    current_objs.append(mol.objective)
+                    all_valid_mols.append(mol)
+
+            # --- Aggregated Metrics for WandB/Console ---
+            if not current_objs:
+                scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
+            else:
+                best_score = max(current_objs)
+                mean_score = np.mean(current_objs)
+                is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+
+                scaffold_metrics.append({
+                    "solved": is_solved,
+                    "top1": best_score,
+                    "mean": mean_score
+                })
+
+            # Memory cleanup
+            del grouped_results
+            # import gc; gc.collect() # Uncomment if memory is extremely tight
+
+    # 4. Final Aggregation
     if not scaffold_metrics:
-        print("[Eval] Warning: No valid molecules generated.")
-        return {}, []
-
-    avg_success_rate = np.mean([m["solved"] for m in scaffold_metrics])
-    avg_top1_score = np.mean([m["top1"] for m in scaffold_metrics])
-    avg_mean_score = np.mean([m["mean"] for m in scaffold_metrics])
+        print(f"[{eval_type}] No valid molecules generated.")
+        return {}, ["No valid molecules"]
 
     metrics_out = {
-        f"{eval_type}_success_rate": avg_success_rate,
-        f"{eval_type}_mean_top1_obj": avg_top1_score,
-        f"{eval_type}_global_mean_obj": avg_mean_score,
-        f"{eval_type}_num_scaffolds_evaluated": len(scaffold_metrics)
+        f"{eval_type}_success_rate": np.mean([m["solved"] for m in scaffold_metrics]),
+        f"{eval_type}_mean_top1_obj": np.mean([m["top1"] for m in scaffold_metrics]),
+        f"{eval_type}_global_mean_obj": np.mean([m["mean"] for m in scaffold_metrics]),
+        f"{eval_type}_num_scaffolds": len(scaffold_metrics)
     }
 
     print("=" * 30)
     print(f"EVALUATION REPORT ({eval_type})")
-    print(f"Scaffolds Processed: {len(scaffold_metrics)}")
-    print(f"Success Rate (> {SUCCESS_THRESHOLD}): {avg_success_rate * 100:.2f}%")
-    print(f"Mean Top-1 Score: {avg_top1_score:.4f}")
+    print(f"Detailed logs saved to: {csv_path}")
+    print(f"Success Rate: {metrics_out[f'{eval_type}_success_rate'] * 100:.2f}%")
+    print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
     print("=" * 30)
 
+    # 5. Format Top 20 for Console/Log Text
     all_valid_mols.sort(key=lambda x: x.objective, reverse=True)
-    top_20_objects = all_valid_mols[:20]
+    top_20 = all_valid_mols[:20]
 
     top_20_text_lines = []
-    for i, m in enumerate(top_20_objects):
+    for i, m in enumerate(top_20):
         smi = m.smiles_string if m.smiles_string else "Invalid"
         top_20_text_lines.append(f"{i + 1:02d}: {smi}  obj={m.objective:.4f}")
 
     return metrics_out, top_20_text_lines
-
 
 
 
