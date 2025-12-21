@@ -98,8 +98,8 @@ class MoleculeConfig:
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
-        self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
-        # self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
+        # self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
+        self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
 
         # Optimizer
         self.optimizer = {
@@ -181,7 +181,7 @@ class MoleculeConfig:
         self.validation_scaffolds_path = "scaffold_splitting/zinc_splits/run_seed_42/val_scaffolds.txt"
         # self.evaluation_scaffolds_path = None # Uncomment to test unconditional generation
 
-        self.use_validation_for_ckpt = True  # If True, saves best_model.pt based on val_scaffolds mean score
+        self.use_validation_for_ckpt = True if self.use_dr_grpo else False  # If True, saves best_model.pt based on val_scaffolds mean score
 
         # K: Number of completions per prompt is already set by:
         # self.gumbeldore_config["num_samples_per_instance"] = ... (for iid_mc)
@@ -204,8 +204,8 @@ class MoleculeConfig:
         self.rl_use_il_distillation = False
 
         # Core RL control
-        # self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
-        self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
+        self.rl_replay_microbatch_size = 320  # Streaming microbatch size (0/None => process all trajectories together)
+        # self.rl_replay_microbatch_size = 32  # Streaming microbatch size (0/None => process all trajectories together)
 
         self.rl_streaming_backward = True  # Use streaming backward pass (vs batched; requires microbatching)
 
@@ -221,7 +221,7 @@ class MoleculeConfig:
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
-        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
+        self.freeze_all_except_final_layer = False if self.use_dr_grpo else True  # If True, only final layer is trainable
 
         # Mixed precision
         self.use_amp = True
