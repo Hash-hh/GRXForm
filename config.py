@@ -98,8 +98,8 @@ class MoleculeConfig:
         self.scale_factor_level_one = 1.
         self.scale_factor_level_two = 1.
         self.batch_size_training = 64
-        self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
-        # self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
+        # self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
+        self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
 
         # Optimizer
         self.optimizer = {
@@ -221,7 +221,7 @@ class MoleculeConfig:
 
         # Structural / safety
         self.rl_assert_masks = False  # Enable strict feasibility & finite log_prob assertions
-        self.freeze_all_except_final_layer = False  # If True, only final layer is trainable
+        self.freeze_all_except_final_layer = False if self.use_dr_grpo else True # If True, only final layer is trainable
 
         # Mixed precision
         self.use_amp = True
