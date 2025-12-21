@@ -4,6 +4,8 @@ Standalone script to evaluate trained model checkpoints without retraining.
 Usage:
     python evaluate_checkpoint.py --checkpoint path/to/best_model.pt
     python evaluate_checkpoint.py --checkpoint path/to/best_model.pt --config configs.my_config
+    python evaluate_checkpoint.py --checkpoint path/to/best_model.pt --batch_size 250
+    python evaluate_checkpoint.py --checkpoint path/to/best_model.pt --subset_percent 1
 """
 
 import argparse
@@ -18,6 +20,7 @@ os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 import ray
 import torch
 import numpy as np
+from tqdm import tqdm
 
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
@@ -26,68 +29,110 @@ from molecule_evaluator import MoleculeObjectiveEvaluator
 
 
 def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
-             objective_evaluator: MoleculeObjectiveEvaluator):
-    """Simple evaluation without batching."""
+             objective_evaluator: MoleculeObjectiveEvaluator, batch_size: int = 500,
+             subset_percent: float = 100.0):
+    """Batched evaluation to avoid OOM."""
     config = copy.deepcopy(config)
     config.gumbeldore_config["destination_path"] = None
-    config.use_fragment_library = False
 
     gumbeldore_dataset = GumbeldoreDataset(
         config=config, objective_evaluator=objective_evaluator
     )
 
     test_prompts = None
+    use_batched_eval = False
+    EVAL_BATCH_SIZE = batch_size
 
     if getattr(config, 'evaluation_scaffolds_path', None):
         path = config.evaluation_scaffolds_path
-        if not os.path.exists(path):
-            path = os.path.abspath(path)
-
         if os.path.exists(path):
             print(f"[Eval] Loading Test Scaffolds from: {path}")
             with open(path, 'r') as f:
                 test_prompts = [line.strip() for line in f if line.strip()]
 
-            # Use only 1% of scaffolds
-            original_count = len(test_prompts)
-            sample_size = max(1, int(original_count * 0.001))
-            test_prompts = test_prompts[:sample_size]
-            print(f"[Eval] Using {sample_size}/{original_count} scaffolds (1% sample)")
+            # Subset to first N% if requested (deterministic, no randomness)
+            if subset_percent < 100.0:
+                original_count = len(test_prompts)
+                subset_count = max(1, int(len(test_prompts) * subset_percent / 100.0))
+                test_prompts = test_prompts[:subset_count]
+                print(f"[Eval] Using first {subset_percent}% of scaffolds: {subset_count}/{original_count}")
+
+            if len(test_prompts) > EVAL_BATCH_SIZE:
+                use_batched_eval = True
+                print(f"[Eval] Large test set ({len(test_prompts)} scaffolds). Using batched evaluation.")
         else:
-            print(f"[Eval] WARNING: Config path {config.evaluation_scaffolds_path} not found.")
+            print(f"[Eval] WARNING: Config path {path} not found.")
+    elif config.prodrug_mode:
+        test_prompts = config.prodrug_parents_test
+        # Also apply subset to prodrug mode
+        if subset_percent < 100.0 and test_prompts:
+            original_count = len(test_prompts)
+            subset_count = max(1, int(len(test_prompts) * subset_percent / 100.0))
+            test_prompts = test_prompts[:subset_count]
+            print(f"[Eval] Using first {subset_percent}% of scaffolds: {subset_count}/{original_count}")
 
     SUCCESS_THRESHOLD = 0.5
     scaffold_metrics = []
     all_valid_mols = []
 
-    print(f"[Eval] Generating molecules for {len(test_prompts) if test_prompts else 'default'} scaffolds...")
+    if use_batched_eval and test_prompts is not None:
+        num_batches = (len(test_prompts) + EVAL_BATCH_SIZE - 1) // EVAL_BATCH_SIZE
+        print(f"[Eval] Processing {len(test_prompts)} scaffolds in {num_batches} batches...")
 
-    grouped_trajectories = gumbeldore_dataset.generate_dataset(
-        copy.deepcopy(network.get_weights()),
-        memory_aggressive=True,  # Enable memory aggressive mode
-        prompts=test_prompts,
-        return_raw_trajectories=True
-    )
+        for batch_idx in tqdm(range(num_batches), desc="Eval Batches"):
+            start_idx = batch_idx * EVAL_BATCH_SIZE
+            end_idx = min(start_idx + EVAL_BATCH_SIZE, len(test_prompts))
+            batch_prompts = test_prompts[start_idx:end_idx]
 
-    for group in grouped_trajectories:
-        if not group:
-            continue
-        objs = [m.objective for m in group if m.objective is not None]
-        valid_mols = [m for m in group if m.objective is not None]
-        all_valid_mols.extend(valid_mols)
+            grouped_trajectories = gumbeldore_dataset.generate_dataset(
+                copy.deepcopy(network.get_weights()),
+                memory_aggressive=False,
+                prompts=batch_prompts,
+                return_raw_trajectories=True
+            )
 
-        if not objs:
-            scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
-            continue
+            for group in grouped_trajectories:
+                if not group:
+                    continue
+                objs = [m.objective for m in group if m.objective is not None]
+                valid_mols = [m for m in group if m.objective is not None]
+                all_valid_mols.extend(valid_mols)
 
-        best_score = max(objs)
-        mean_score = np.mean(objs)
-        is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
-        scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
+                if not objs:
+                    scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
+                    continue
 
-    del grouped_trajectories
-    torch.cuda.empty_cache()
-    gc.collect()
+                best_score = max(objs)
+                mean_score = np.mean(objs)
+                is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+                scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
+
+            del grouped_trajectories
+            torch.cuda.empty_cache()
+            gc.collect()
+    else:
+        grouped_trajectories = gumbeldore_dataset.generate_dataset(
+            copy.deepcopy(network.get_weights()),
+            memory_aggressive=False,
+            prompts=test_prompts,
+            return_raw_trajectories=True
+        )
+
+        for group in grouped_trajectories:
+            if not group:
+                continue
+            objs = [m.objective for m in group if m.objective is not None]
+            valid_mols = [m for m in group if m.objective is not None]
+            all_valid_mols.extend(valid_mols)
+
+            if not objs:
+                scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
+                continue
+
+            best_score = max(objs)
+            mean_score = np.mean(objs)
+            is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+            scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
 
     if not scaffold_metrics:
         print("[Eval] Warning: No valid molecules generated.")
@@ -112,8 +157,10 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print("=" * 30)
 
     all_valid_mols.sort(key=lambda x: x.objective, reverse=True)
+    top_20_objects = all_valid_mols[:20]
+
     top_20_text_lines = []
-    for i, m in enumerate(all_valid_mols[:20]):
+    for i, m in enumerate(top_20_objects):
         smi = m.smiles_string if m.smiles_string else "Invalid"
         top_20_text_lines.append(f"{i + 1:02d}: {smi}  obj={m.objective:.4f}")
 
@@ -123,40 +170,48 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
 def main():
     parser = argparse.ArgumentParser(description='Evaluate a trained checkpoint')
     parser.add_argument('--checkpoint', type=str, required=True,
-                        help='Path to checkpoint file')
+                        help='Path to checkpoint file (e.g., best_model.pt)')
     parser.add_argument('--config', type=str, default=None,
-                        help='Optional config module path')
+                        help='Optional config module path (e.g., configs.my_config)')
+    parser.add_argument('--batch_size', type=int, default=500,
+                        help='Batch size for evaluation (default: 500)')
     parser.add_argument('--output_dir', type=str, default=None,
-                        help='Directory to save results')
+                        help='Directory to save results (default: same as checkpoint)')
+    parser.add_argument('--subset_percent', type=float, default=100.0,
+                        help='Percentage of test scaffolds to use (1-100, default: 100). Takes first N%% deterministically.')
     args = parser.parse_args()
 
+    # Load config
     if args.config is not None:
         ConfigClass = importlib.import_module(args.config).MoleculeConfig
     else:
         ConfigClass = MoleculeConfig
     config = ConfigClass()
 
-    print(f"Current working directory: {os.getcwd()}")
-    print(f"Checkpoint exists: {os.path.exists(args.checkpoint)}")
-    print(f"Test scaffolds exist: {os.path.exists(config.evaluation_scaffolds_path)}")
-
+    # Set num_epochs to 0 to skip training
     config.num_epochs = 0
 
-    output_dir = args.output_dir if args.output_dir else os.path.dirname(args.checkpoint)
+    # Output directory
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = os.path.dirname(args.checkpoint)
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Evaluating checkpoint: {args.checkpoint}")
     print(f"Output directory: {output_dir}")
 
-    # Use fewer GPUs/workers to reduce memory pressure
+    # Initialize Ray
     num_gpus = len(config.CUDA_VISIBLE_DEVICES.split(","))
     if ray.is_initialized():
         ray.shutdown()
     ray.init(num_gpus=num_gpus, logging_level="info", ignore_reinit_error=True)
 
+    # Seed
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
 
+    # Load model
     network = MoleculeTransformer(config, config.training_device)
     objective_eval = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
 
@@ -168,14 +223,19 @@ def main():
     network.to(network.device)
     network.eval()
 
+    # Run evaluation
     torch.cuda.empty_cache()
     with torch.no_grad():
-        test_metrics, test_top20 = evaluate('test', config, network, objective_eval)
+        test_metrics, test_top20 = evaluate('test', config, network, objective_eval,
+                                            batch_size=args.batch_size,
+                                            subset_percent=args.subset_percent)
 
+    # Save results
     results_file = os.path.join(output_dir, "evaluation_results.txt")
     with open(results_file, 'w') as f:
         f.write(f"Checkpoint: {args.checkpoint}\n")
-        f.write(f"Epochs trained: {checkpoint.get('epochs_trained', 'unknown')}\n\n")
+        f.write(f"Epochs trained: {checkpoint.get('epochs_trained', 'unknown')}\n")
+        f.write(f"Subset percent: {args.subset_percent}%\n\n")
         f.write("METRICS:\n")
         for k, v in test_metrics.items():
             f.write(f"  {k}: {v}\n")

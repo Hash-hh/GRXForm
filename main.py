@@ -26,6 +26,7 @@ from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
 from molecule_evaluator import MoleculeObjectiveEvaluator
 from rl_updates import dr_grpo_update, TrajectoryRecord
 
+os.environ["RAY_raylet_start_wait_time_s"] = "120"  # Increase from default 60s
 
 def save_checkpoint(checkpoint: dict, filename: str, config: MoleculeConfig):
     os.makedirs(config.results_path, exist_ok=True)
@@ -481,35 +482,28 @@ if __name__ == '__main__':
     print(">> Molecule Design")
 
     parser = argparse.ArgumentParser(description='Experiment')
-    parser.add_argument('--config', help="Path to optional config relative to main.py")
+    parser.add_argument('--config', help="Path to optional config (e.g. 'experiments.exp_01')")
 
-    # We add arguments for the parameters defined in sweep.yaml
-    # Use defaults from base config if the script is run without `wandb agent`
-    temp_config_for_defaults = MoleculeConfig()  # Load defaults once
-    parser.add_argument('--learning_rate', type=float,
-                        default=temp_config_for_defaults.optimizer["lr"],
-                        help='Optimizer learning rate')
-    parser.add_argument('--rl_entropy_beta', type=float,
-                        default=temp_config_for_defaults.rl_entropy_beta,
-                        help='Entropy bonus coefficient for RL')
-    parser.add_argument('--ppo_epochs', type=int,
-                        default=temp_config_for_defaults.ppo_epochs,
-                        help='Number of PPO epochs per RL update')
-    parser.add_argument('--rl_ppo_clip_epsilon', type=float,
-                        default=temp_config_for_defaults.rl_ppo_clip_epsilon,
-                        help='GRPO clipping epsilon')
-    del temp_config_for_defaults  # Clean up temporary config
+    parser.add_argument('--learning_rate', type=float, default=None)
+    parser.add_argument('--rl_entropy_beta', type=float, default=None)
+    parser.add_argument('--ppo_epochs', type=int, default=None)
+    parser.add_argument('--rl_ppo_clip_epsilon', type=float, default=None)
 
     args = parser.parse_args()
-
     if args.config is not None:
         MoleculeConfig = importlib.import_module(args.config).MoleculeConfig
-    config = MoleculeConfig()
+    else:
+        from config import MoleculeConfig
 
-    config.optimizer["lr"] = args.learning_rate
-    config.rl_entropy_beta = args.rl_entropy_beta
-    config.ppo_epochs = args.ppo_epochs
-    config.rl_ppo_clip_epsilon = args.rl_ppo_clip_epsilon
+    config = MoleculeConfig()
+    if args.learning_rate is not None:
+        config.optimizer["lr"] = args.learning_rate
+    if args.rl_entropy_beta is not None:
+        config.rl_entropy_beta = args.rl_entropy_beta
+    if args.ppo_epochs is not None:
+        config.ppo_epochs = args.ppo_epochs
+    if args.rl_ppo_clip_epsilon is not None:
+        config.rl_ppo_clip_epsilon = args.rl_ppo_clip_epsilon
 
     # --- WANDB INITIALIZATION ---
     if hasattr(config, 'use_wandb') and config.use_wandb:
@@ -544,7 +538,33 @@ if __name__ == '__main__':
     if ray.is_initialized():
         ray.shutdown()  # In case ray was already running and messing things up
 
-    ray.init(num_gpus=num_gpus, logging_level="info", ignore_reinit_error=True)
+    import platform
+
+    is_local_windows = platform.system() == "Windows"
+
+    ray_init_args = {
+        "num_gpus": num_gpus,
+        "logging_level": "info",
+        "ignore_reinit_error": True,
+        # "local_mode": True  <-- DELETE THIS. Local mode hides concurrency bugs.
+    }
+
+    if is_local_windows:
+        # Windows-specific fixes to stop the crashing
+        ray_init_args["include_dashboard"] = False  # Dashboard often crashes on Windows
+        ray_init_args["_temp_dir"] = "C:/ray_tmp"  # Short path avoids path length errors
+
+        # This fixes the VPN/Network blocking issue
+        import socket
+
+        ray_init_args["address"] = "local"
+    else:
+        # Cluster settings (Linux)
+        ray_init_args["include_dashboard"] = True  # Useful on cluster
+        # On Slurm, Ray usually auto-detects the address, or you start it via script
+
+    ray.init(**ray_init_args)
+
     print(ray.available_resources())
 
     logger = Logger(args, config.results_path, config.log_to_file)
