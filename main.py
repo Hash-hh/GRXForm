@@ -39,12 +39,12 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
                    objective_evaluator: MoleculeObjectiveEvaluator):
     """
     Runs deterministic validation on the scaffolds defined in config.validation_scaffolds_path.
-    Returns the mean objective score.
+    Returns the mean objective score and success rate.
     """
     val_path = getattr(config, 'validation_scaffolds_path', None)
     if not val_path or not os.path.exists(val_path):
         print(f"[Val] Validation path not found or not set: {val_path}")
-        return float("-inf")
+        return float("-inf"), 0.0
 
     # Load Scaffolds
     with open(val_path, 'r') as f:
@@ -52,10 +52,9 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
 
     if not val_scaffolds:
         print("[Val] Validation file empty.")
-        return float("-inf")
+        return float("-inf"), 0.0
 
     # Create a clean config for Greedy/Deterministic Search
-    # We clone to avoid messing up the main training config
     val_config = copy.deepcopy(config)
     val_config.gumbeldore_config["search_type"] = "beam_search"
     val_config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
@@ -68,9 +67,6 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     print(f"[Val] Validating on {len(val_scaffolds)} scaffolds (Greedy Decoding)...")
 
     # Generate
-    # return_raw_trajectories=True returns List[List[MoleculeDesign]]
-    # Since beam_width=1, inner list has size 1.
-
     grouped_results = dataset.generate_dataset(
         network_weights=copy.deepcopy(network.get_weights()),
         memory_aggressive=False,
@@ -80,30 +76,52 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     )
 
     scores = []
+    success_count = 0
+    total_mols = 0
+
+    # Check if we should calculate success rate (Only available for Kinase MPO)
+    check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator, 'kinase_mpo_objective')
+
     for group in grouped_results:
         if group and group[0].objective is not None:
-            # Convert -inf to 0.0 for logging purposes
-            val_ = group[0].objective
+            mol = group[0]
+            total_mols += 1
+
+            # --- Score Handling ---
+            val_ = mol.objective
             if val_ == float("-inf"):
                 val_ = 0.0
             scores.append(val_)
 
+            # --- Success Rate Handling ---
+            if check_success and mol.smiles_string:
+                try:
+                    # Access the underlying KinaseMPOObjective instance directly
+                    if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
+                        success_count += 1
+                except Exception as e:
+                    pass  # Ignore errors in success check (e.g. invalid smiles)
+
     if not scores:
         print("[Val] No valid molecules generated.")
-        return float("-inf")
+        return float("-inf"), 0.0
 
     valid_scores = [s for s in scores if s > float("-inf")]
 
     if not valid_scores:
         print("[Val] All generated molecules were invalid (-inf).")
-        return float("-inf")
+        return float("-inf"), 0.0
+
     if len(valid_scores) < len(scores):
-        print(f"[Val] Warning: {len(scores) - len(valid_scores)} out of {len(scores)} molecules were invalid (-inf) and excluded from mean score calculation.")
+        print(
+            f"[Val] Warning: {len(scores) - len(valid_scores)} out of {len(scores)} molecules were invalid (-inf) and excluded from mean score calculation.")
 
     mean_val_score = np.mean(valid_scores)
+    val_success_rate = (success_count / total_mols) if total_mols > 0 else 0.0
 
-    print(f"[Val] Mean Score: {mean_val_score:.4f} (over {len(scores)} molecules)")
-    return mean_val_score
+    print(
+        f"[Val] Mean Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%} (over {total_mols} molecules)")
+    return mean_val_score, val_success_rate
 
 def train_for_one_epoch_supervised(epoch: int,
                                    config: MoleculeConfig,
@@ -717,9 +735,14 @@ if __name__ == '__main__':
 
             # --- [NEW] VALIDATION STEP ---
             current_val_mean_score = float("-inf")
+            current_val_success_rate = 0.0  # Initialize success rate
+
             if config.use_validation_for_ckpt and not config.prodrug_mode:
-                current_val_mean_score = validate_epoch(config, network, objective_eval)
+                # Unpack the two return values
+                current_val_mean_score, current_val_success_rate = validate_epoch(config, network, objective_eval)
+
                 generated_loggable_dict["validation_mean_score"] = current_val_mean_score
+                generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
             # -----------------------------
 
             # Update all-time top-K SMILES archive
@@ -787,6 +810,7 @@ if __name__ == '__main__':
                 if config.use_validation_for_ckpt and not config.prodrug_mode:
                     wandb_log["validation_mean_score"] = current_val_mean_score
                     wandb_log["best_validation_mean_score"] = best_val_mean_score
+                    wandb_log["validation_success_rate"] = current_val_success_rate  # Log to WandB
 
                 # Add specific RL metrics if in RL mode
                 if rl_mode_active:
