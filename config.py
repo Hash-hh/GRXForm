@@ -148,6 +148,7 @@ class MoleculeConfig:
 
             # "max_leaves_per_root": 250,  # Max number of leaves to expand per root node in TASAR. 0 = no limit.
             # "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
+            # "leaf_sampling_mode": "stratified",  # "random" | "stratified" | "topk"
             # "stratified_quantiles": (0.10, 0.90),  # (low_q, high_q)
             # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)

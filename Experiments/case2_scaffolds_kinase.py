@@ -14,12 +14,12 @@ class MoleculeConfig(BaseConfig):
         self.objective_type = "kinase_mpo"
 
         # --- TRAINING (Start from C) ---
-        self.start_from_c_chains = True  # <--- ON
-        self.use_fragment_library = False  # <--- OFF
-        self.fragment_library_path = None  # Ignored
+        self.start_from_c_chains = False  # <--- ON
+        self.use_fragment_library = True  # <--- OFF
 
         # --- INFERENCE (Test on Scaffolds) ---
         seed = 42
+        self.fragment_library_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/train_scaffolds.txt"  # Ignored
         self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
         self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/val_scaffolds.txt"
 
@@ -28,8 +28,8 @@ class MoleculeConfig(BaseConfig):
         self.use_grpo_grouping = True  # Standard GRPO
 
         # sampling parameters
-        self.gumbeldore_config["beam_width"] = 320
-        self.num_prompts_per_epoch = 1
+        self.gumbeldore_config["beam_width"] = 32
+        self.num_prompts_per_epoch = 10
         self.fixed_test_beam_width = 32
         self.num_epochs = 500
 
@@ -38,7 +38,7 @@ class MoleculeConfig(BaseConfig):
         self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"Case2_Scaffold_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
