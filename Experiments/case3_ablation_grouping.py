@@ -38,7 +38,7 @@ class MoleculeConfig(BaseConfig):
         self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"Case2_Scaffold_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"Case3_Ablation_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":
