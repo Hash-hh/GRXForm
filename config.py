@@ -1,7 +1,9 @@
 import os
 import datetime
 import platform
+import uuid
 
+uid = uuid.uuid4().hex
 
 class MoleculeConfig:
     def __init__(self):
@@ -128,7 +130,7 @@ class MoleculeConfig:
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cuda:0"] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
-            "destination_path": "./data/generated_molecules.pickle",
+            "destination_path": f"./data/generated_molecules_{uid}.pickle",
             # "destination_path": None,
             "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
             "batch_size_per_cpu_worker": 1,
@@ -154,6 +156,7 @@ class MoleculeConfig:
             # "stratified_target_fracs": (0.25, 0.50, 0.25),  # (top, mid, bottom)
             # "stratified_allow_shortfall_fill": True
         }
+        print("UID for this run:", uid)
 
         # Results and logging
         self.results_path = os.path.join("./results",

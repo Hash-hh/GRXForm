@@ -407,11 +407,17 @@ class GumbeldoreDataset:
             with open(destination_path, "wb") as f:
                 pickle.dump(merged_mols, f)
 
-        # Get overall best metrics and molecules
-        metrics_return["mean_top_20_obj"] = np.array([x["obj"] for x in merged_mols[:20]]).mean()
+        # # Get overall best metrics and molecules
+        # metrics_return["mean_top_20_obj"] = np.array([x["obj"] for x in merged_mols[:20]]).mean()
+        # metrics_return["mean_kept_obj"] = np.array([x["obj"] for x in merged_mols]).mean()
+        # metrics_return["mean_top_20_sa_score"] = np.array([x["sa_score"] for x in merged_mols[:20]]).mean()
+        # metrics_return["top_20_molecules"] = [{x["smiles"]: x["obj"] for x in merged_mols[:20]}]
+
+        # TODO: Add a seperate return for all molecules; don't use top 20
+        metrics_return["mean_top_20_obj"] = np.array([x["obj"] for x in merged_mols]).mean()
         metrics_return["mean_kept_obj"] = np.array([x["obj"] for x in merged_mols]).mean()
-        metrics_return["mean_top_20_sa_score"] = np.array([x["sa_score"] for x in merged_mols[:20]]).mean()
-        metrics_return["top_20_molecules"] = [{x["smiles"]: x["obj"] for x in merged_mols[:20]}]
+        metrics_return["mean_top_20_sa_score"] = np.array([x["sa_score"] for x in merged_mols]).mean()
+        metrics_return["top_20_molecules"] = [{x["smiles"]: x["obj"] for x in merged_mols}]
 
         return metrics_return
 

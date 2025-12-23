@@ -54,12 +54,25 @@ class KinaseMPOObjective:
         qed = self.qed(smiles)
         sa = self.sa(smiles)
 
-        print(f"GSK3B: {gsk}, JNK3: {jnk}, QED: {qed}, SA: {sa}")
-
         # The hard thresholds defined in the benchmark paper
         return (gsk >= 0.5) and (jnk >= 0.5) and (qed >= 0.6) and (sa < 4.0)
         # except:
         #     return False
+
+    def individual_scores(self, smiles):
+        """
+        Returns individual component scores for analysis.
+        """
+        gsk = self.gsk3(smiles)
+        jnk = self.jnk3(smiles)
+        qed = self.qed(smiles)
+        sa = self.sa(smiles)
+        return {
+            "GSK3B": gsk,
+            "JNK3": jnk,
+            "QED": qed,
+            "SA": sa
+        }
 
 if __name__ == "__main__":
     objective = KinaseMPOObjective()

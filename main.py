@@ -4,6 +4,7 @@ import importlib
 import os
 import time
 from typing import List, Optional
+from operator import attrgetter
 
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LambdaLR
@@ -95,12 +96,9 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
 
             # --- Success Rate Handling ---
             if check_success and mol.smiles_string:
-                try:
-                    # Access the underlying KinaseMPOObjective instance directly
-                    if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
-                        success_count += 1
-                except Exception as e:
-                    pass  # Ignore errors in success check (e.g. invalid smiles)
+                # Access the underlying KinaseMPOObjective instance directly
+                if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
+                    success_count += 1
 
     if not scores:
         print("[Val] No valid molecules generated.")
@@ -122,6 +120,122 @@ def validate_epoch(config: MoleculeConfig, network: MoleculeTransformer,
     print(
         f"[Val] Mean Score: {mean_val_score:.4f} | Success Rate: {val_success_rate:.2%} (over {total_mols} molecules)")
     return mean_val_score, val_success_rate
+
+
+def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
+             objective_evaluator: MoleculeObjectiveEvaluator):
+    """
+    Evaluates the model on validate scaffolds one-by-one for TASAR etc.
+    Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
+    """
+
+    # Update config for evaluation
+    # Create a clean config for Greedy/Deterministic Search
+    config = copy.deepcopy(config_orig)
+    config.gumbeldore_config["search_type"] = "beam_search"
+    config.gumbeldore_config["beam_width"] = 1  # 1 molecule per scaffold
+    config.gumbeldore_config["deterministic"] = True  # Deterministic transition
+    config.gumbeldore_config["num_trajectories_to_keep"] = 1000
+    config.gumbeldore_config["destination_path"] = None  # Don't save to disk
+
+    # 1. Load Scaffolds
+    validitation_prompts = []
+
+    # Priority A: Check explicit path in config
+    path = getattr(config, 'validation_scaffolds_path', None)
+    if path and os.path.exists(path):
+        print(f"[{eval_type}] Loading Scaffolds from: {path}")
+        with open(path, 'r') as f:
+            validitation_prompts = [line.strip() for line in f if line.strip()]
+
+    # Priority B: Check Prodrug mode
+    elif config.prodrug_mode:
+        print(f"[{eval_type}] Using Prodrug test parents.")
+        validitation_prompts = config.prodrug_parents_test
+
+    if not validitation_prompts:
+        print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
+        return {}, ["No scaffolds found"]
+
+    print(f"[{eval_type}] Found {len(validitation_prompts)} scaffolds. Processing one by one...")
+
+    # 2. Setup Config for Evaluation
+    eval_config = copy.deepcopy(config)
+    eval_config.gumbeldore_config["destination_path"] = None  # Disable internal pickling
+
+    dataset = GumbeldoreDataset(config=eval_config, objective_evaluator=objective_evaluator)
+    weights = copy.deepcopy(network.get_weights())
+
+    scores = []
+    success_count = 0
+    total_mols = 0
+
+    for idx, prompt in tqdm(enumerate(validitation_prompts), total=len(validitation_prompts), desc=f"Evaluating ({eval_type})"):
+
+        # Generate K candidates for this SINGLE prompt
+        grouped_results = [dataset.generate_dataset(
+            network_weights=weights,
+            memory_aggressive=False,
+            prompts=[prompt],
+            return_raw_trajectories=True,
+            mode="eval"
+        )]
+
+
+        # Check if we should calculate success rate (Only available for Kinase MPO)
+        check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator,
+                                                                            'kinase_mpo_objective')
+
+        if grouped_results and grouped_results[0]["best_gen_obj"] is not None:
+            for mol in list(grouped_results[0]["top_20_molecules"][0].keys()):  # loop over all the beam leaves (only one beam leaf if beam_width=1)
+
+                # --- Success Rate Handling ---
+                if check_success and mol:
+                    # Access the underlying KinaseMPOObjective instance directly
+                    if objective_evaluator.kinase_mpo_objective.is_successful(mol):
+                        success_count += 1
+
+                    # --- Score Handling ---
+                    val_ = grouped_results[0]["top_20_molecules"][0][mol]
+                    if val_ == float("-inf"):
+                        val_ = 0.0
+                    scores.append(val_)
+
+                    # individual metrics for each scaffold
+                    if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+                        individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol)
+
+                    break
+
+        total_mols += 1
+
+
+        if not scores:
+            print("[Val] No valid molecules generated.")
+            return float("-inf"), 0.0
+
+
+        # --- Logging ---
+
+        # Memory cleanup
+        del grouped_results
+        # import gc; gc.collect() # Uncomment if memory is extremely tight
+
+
+    # Final Aggregation
+    metrics_out = {
+        f"{eval_type}_success_rate": success_count/total_mols,
+        f"{eval_type}_mean_top1_obj": np.mean(scores),
+    }
+
+    print("=" * 30)
+    print(f"EVALUATION REPORT ({eval_type})")
+    print(f"Success Rate: {metrics_out[f'{eval_type}_success_rate'] * 100:.2f}%")
+    print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
+    print("=" * 30)
+
+    return success_count/total_mols, np.mean(scores), individual_scores
+
 
 def train_for_one_epoch_supervised(epoch: int,
                                    config: MoleculeConfig,
@@ -226,6 +340,26 @@ def train_for_one_epoch_supervised(epoch: int,
     metrics["loss_level_two"] = accumulated_loss_lvl_two / num_batches
 
     top_20_molecules = metrics["top_20_molecules"]
+
+    # Detailed logging kinase MPO
+    if config.objective_type == 'kinase_mpo':
+        gsk3b_scores = []
+        jnk3_scores = []
+        qed_scores = []
+        sa_scores = []
+
+        for smiles in list(top_20_molecules[0].keys()):
+            individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(smiles)
+            gsk3b_scores.append(individual_scores.get('GSK3B'))
+            jnk3_scores.append(individual_scores.get('JNK3'))
+            qed_scores.append(individual_scores.get('QED'))
+            sa_scores.append(individual_scores.get('SA'))
+
+        metrics["gsk3b_scores"] = np.mean(gsk3b_scores).item()
+        metrics["jnk3_scores"] = np.mean(jnk3_scores).item()
+        metrics["qed_scores"] = np.mean(qed_scores).item()
+        metrics["sa_scores"] = np.mean(sa_scores).item()
+
     del metrics["top_20_molecules"]
     return metrics, top_20_molecules
 
@@ -325,6 +459,27 @@ def train_for_one_epoch_rl(epoch: int,
     else:
         metrics["mean_top_20_obj"] = float("-inf")
 
+
+    # Detailed logging kinase MPO
+    if config.objective_type == 'kinase_mpo':
+        gsk3b_scores = []
+        jnk3_scores = []
+        qed_scores = []
+        sa_scores = []
+
+        for entry in unique_mols:
+            individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(entry['smiles'])
+            gsk3b_scores.append(individual_scores.get('GSK3B'))
+            jnk3_scores.append(individual_scores.get('JNK3'))
+            qed_scores.append(individual_scores.get('QED'))
+            sa_scores.append(individual_scores.get('SA'))
+
+        metrics["gsk3b_scores"] = np.mean(gsk3b_scores).item()
+        metrics["jnk3_scores"] = np.mean(jnk3_scores).item()
+        metrics["qed_scores"] = np.mean(qed_scores).item()
+        metrics["sa_scores"] = np.mean(sa_scores).item()
+
+
     top_20_text_lines = []
     for i, entry in enumerate(top20):
         top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
@@ -334,12 +489,23 @@ def train_for_one_epoch_rl(epoch: int,
     return metrics, top_20_text_lines
 
 
-def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransformer,
+def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
              objective_evaluator: MoleculeObjectiveEvaluator):
     """
     Evaluates the model on test scaffolds one-by-one.
     Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
+    RL (GRPO) version.
     """
+
+    # Update config for evaluation
+    # Create a clean config for Greedy/Deterministic Search
+    config = copy.deepcopy(config_orig)
+    config.gumbeldore_config["search_type"] = "beam_search"
+    config.gumbeldore_config["beam_width"] = config.fixed_test_beam_width  # 1 molecule per scaffold
+    config.gumbeldore_config["deterministic"] = True  # Deterministic transition
+    config.gumbeldore_config["num_trajectories_to_keep"] = 1000
+    config.gumbeldore_config["destination_path"] = None  # Don't save to disk
+
     # 1. Load Scaffolds
     test_prompts = []
 
@@ -379,16 +545,16 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     dataset = GumbeldoreDataset(config=eval_config, objective_evaluator=objective_evaluator)
     weights = copy.deepcopy(network.get_weights())
 
-    all_valid_mols = []
-    scaffold_metrics = []
-    SUCCESS_THRESHOLD = 0.5
-
     # 3. Open CSV and Start Loop
     # We use 'w' mode to overwrite if restarting, or 'a' could be used if careful.
     with open(csv_path, mode='w', newline='') as csv_file:
-        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_valid']
+        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_successful',
+                      'gsk3b', 'jnk3', 'qed', 'sa']
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
+        scores = []
+        success_count = 0
+        total_mols = 0
 
         for idx, prompt in tqdm(enumerate(test_prompts), total=len(test_prompts), desc=f"Evaluating ({eval_type})"):
 
@@ -409,61 +575,100 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
                     'prompt_smiles': prompt,
                     'generated_smiles': "GENERATION_FAILED",
                     'objective_score': 0.0,
-                    'is_valid': False
+                    'is_successful': False,
+                    'gsk3b': 0,
+                    'jnk3': 0,
+                    'qed': 0,
+                    'sa': 0
                 })
-                scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
                 continue
+
+            # Check if we should calculate success rate (Only available for Kinase MPO) -- checkability xD
+            check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator,
+                                                                                'kinase_mpo_objective')
 
             group = grouped_results[0]  # List of MoleculeDesign objects
 
             # --- Detailed Logging to CSV ---
-            current_objs = []
 
-            for mol in group:
+            best_mol = max(group, key=attrgetter('objective'))
+
+            if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+                individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(best_mol.smiles_string)
+                val_ = best_mol.objective
+                gsk = individual_scores.get('GSK3B')
+                jnk = individual_scores.get('JNK3')
+                qed = individual_scores.get('QED')
+                sa = individual_scores.get('SA')
+
+            # Sort the objects
+            ordered_group = sorted(
+                group,
+                key=lambda x: x.objective if x.objective is not None else float("-inf"),
+                reverse=True
+            )
+
+            for mol in ordered_group:  # beam leaves
+                is_successful = False
+
                 obj_val = mol.objective if mol.objective is not None else float("-inf")
                 smi = mol.smiles_string if mol.smiles_string else ""
 
-                # Write EVERY beam to the CSV
-                writer.writerow({
-                    'scaffold_idx': idx,
-                    'prompt_smiles': prompt,
-                    'generated_smiles': smi,
-                    'objective_score': obj_val if obj_val > float("-inf") else 0.0,
-                    'is_valid': (mol.objective is not None)
-                })
+                # --- Success rate ---
+                if check_success and mol:
+                    if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
+                        is_successful = True
+                        success_count += 1
 
-                if mol.objective is not None:
-                    current_objs.append(mol.objective)
-                    all_valid_mols.append(mol)
+                if not is_successful:
+                    continue
 
-            # --- Aggregated Metrics for WandB/Console ---
-            if not current_objs:
-                scaffold_metrics.append({"solved": 0.0, "top1": 0.0, "mean": 0.0})
-            else:
-                best_score = max(current_objs)
-                mean_score = np.mean(current_objs)
-                is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+                # best mol individual scores
+                val_ = mol.objective
 
-                scaffold_metrics.append({
-                    "solved": is_solved,
-                    "top1": best_score,
-                    "mean": mean_score
-                })
 
-            # Memory cleanup
-            del grouped_results
-            # import gc; gc.collect() # Uncomment if memory is extremely tight
+                # individual metrics for each scaffold
+                if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+                    individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol.smiles_string)
+                    gsk = individual_scores.get('GSK3B')
+                    jnk = individual_scores.get('JNK3')
+                    qed = individual_scores.get('QED')
+                    sa = individual_scores.get('SA')
+
+                break
+
+            total_mols += 1
+            scores.append(val_)
+
+            if not scores:
+                print("[Val] No valid molecules generated.")
+                return float("-inf"), 0.0
+
+
+        # Write EVERY beam leaf to the CSV
+        writer.writerow({
+            'scaffold_idx': idx,
+            'prompt_smiles': prompt,
+            'generated_smiles': smi,
+            'objective_score': obj_val if obj_val > float("-inf") else 0.0,
+            'is_successful': False,
+            'gsk3b': gsk,
+            'jnk3': jnk,
+            'qed': qed,
+            'sa': sa
+        })
+
+
+        # Memory cleanup
+        del grouped_results
+        # import gc; gc.collect() # Uncomment if memory is extremely tight
+
 
     # 4. Final Aggregation
-    if not scaffold_metrics:
-        print(f"[{eval_type}] No valid molecules generated.")
-        return {}, ["No valid molecules"]
 
     metrics_out = {
-        f"{eval_type}_success_rate": np.mean([m["solved"] for m in scaffold_metrics]),
-        f"{eval_type}_mean_top1_obj": np.mean([m["top1"] for m in scaffold_metrics]),
-        f"{eval_type}_global_mean_obj": np.mean([m["mean"] for m in scaffold_metrics]),
-        f"{eval_type}_num_scaffolds": len(scaffold_metrics)
+        f"{eval_type}_success_rate": success_count/total_mols,
+        f"{eval_type}_mean_top1_obj": np.mean(scores),
     }
 
     print("=" * 30)
@@ -473,16 +678,200 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
     print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
     print("=" * 30)
 
-    # 5. Format Top 20 for Console/Log Text
-    all_valid_mols.sort(key=lambda x: x.objective, reverse=True)
-    top_20 = all_valid_mols[:20]
+    return metrics_out
 
-    top_20_text_lines = []
-    for i, m in enumerate(top_20):
-        smi = m.smiles_string if m.smiles_string else "Invalid"
-        top_20_text_lines.append(f"{i + 1:02d}: {smi}  obj={m.objective:.4f}")
 
-    return metrics_out, top_20_text_lines
+
+
+def evaluate_supervised(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTransformer,
+             objective_evaluator: MoleculeObjectiveEvaluator):
+    """
+    Evaluates the model on test scaffolds one-by-one for TASAR etc.
+    Saves a detailed CSV of EVERY generated molecule for post-hoc analysis.
+    """
+
+    # Update config for evaluation
+    # Create a clean config for Greedy/Deterministic Search
+    config = copy.deepcopy(config_orig)
+    config.gumbeldore_config["search_type"] = "beam_search"
+    config.gumbeldore_config["beam_width"] = config.fixed_test_beam_width  # 1 molecule per scaffold
+    config.gumbeldore_config["deterministic"] = True  # Deterministic transition
+    config.gumbeldore_config["num_trajectories_to_keep"] = 1000
+    config.gumbeldore_config["destination_path"] = None  # Don't save to disk
+
+    # 1. Load Scaffolds
+    test_prompts = []
+
+    # Priority A: Check explicit path in config
+    path = getattr(config, 'evaluation_scaffolds_path', None)
+    if path and os.path.exists(path):
+        print(f"[{eval_type}] Loading Scaffolds from: {path}")
+        with open(path, 'r') as f:
+            test_prompts = [line.strip() for line in f if line.strip()]
+
+    # Priority B: Check Prodrug mode
+    elif config.prodrug_mode:
+        print(f"[{eval_type}] Using Prodrug test parents.")
+        test_prompts = config.prodrug_parents_test
+
+    if not test_prompts:
+        print(f"[{eval_type}] Warning: No scaffolds found. Skipping evaluation.")
+        return {}, ["No scaffolds found"]
+
+    print(f"[{eval_type}] Found {len(test_prompts)} scaffolds. Processing one by one...")
+
+    # 2. Setup Config for Evaluation
+    eval_config = copy.deepcopy(config)
+    eval_config.gumbeldore_config["destination_path"] = None  # Disable internal pickling
+
+    # Create the CSV Log File
+    os.makedirs(config.results_path, exist_ok=True)
+    csv_filename = f"{eval_type}_detailed_logs.csv"
+    csv_path = os.path.join(config.results_path, csv_filename)
+    print(f"[{eval_type}] saving detailed logs to: {csv_path}")
+
+    if getattr(eval_config, 'fixed_test_beam_width', None) is not None:
+        eval_config.gumbeldore_config["beam_width"] = eval_config.fixed_test_beam_width
+
+    print(f"[{eval_type}] using beam width:", eval_config.gumbeldore_config["beam_width"])
+
+    dataset = GumbeldoreDataset(config=eval_config, objective_evaluator=objective_evaluator)
+    weights = copy.deepcopy(network.get_weights())
+
+    # 3. Open CSV and Start Loop
+    # We use 'w' mode to overwrite if restarting, or 'a' could be used if careful.
+    with open(csv_path, mode='w', newline='') as csv_file:
+        print("Opened CSV for writing:", csv_path)
+        fieldnames = ['scaffold_idx', 'prompt_smiles', 'generated_smiles', 'objective_score', 'is_successful',
+                      'gsk3b', 'jnk3', 'qed', 'sa']
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+        scores = []
+        success_count = 0
+        total_mols = 0
+
+        for idx, prompt in tqdm(enumerate(test_prompts), total=len(test_prompts), desc=f"Evaluating ({eval_type})"):
+
+            is_successful = False  # Reset for each prompt
+            if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+                gsk = None
+                jnk = None
+                qed = None
+                sa = None
+
+            # Generate K candidates for this SINGLE prompt
+            grouped_results = [dataset.generate_dataset(
+                network_weights=weights,
+                memory_aggressive=False,
+                prompts=[prompt],
+                return_raw_trajectories=True,
+                mode="eval"
+            )]
+
+            # Check if generation returned anything
+            if not grouped_results:
+                # Log failure in CSV
+                writer.writerow({
+                    'scaffold_idx': idx,
+                    'prompt_smiles': prompt,
+                    'generated_smiles': "GENERATION_FAILED",
+                    'objective_score': 0.0,
+                    'is_successful': False,
+                    'gsk3b': 0,
+                    'jnk3': 0,
+                    'qed': 0,
+                    'sa': 0
+                })
+                continue
+
+
+            # Check if we should calculate success rate (Only available for Kinase MPO)
+            check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator,
+                                                                                'kinase_mpo_objective')
+
+            best_mol = list(grouped_results[0]["top_20_molecules"][0].keys())[0]
+            if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+                individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(best_mol)
+                gsk = individual_scores.get('GSK3B')
+                jnk = individual_scores.get('JNK3')
+                qed = individual_scores.get('QED')
+                sa = individual_scores.get('SA')
+
+
+            if grouped_results and grouped_results[0]["best_gen_obj"] is not None:
+                for mol in list(grouped_results[0]["top_20_molecules"][0].keys()):  # loop over all the beam leaves
+
+                    # --- Success Rate Handling ---
+                    if check_success and mol:
+                        # Access the underlying KinaseMPOObjective instance directly
+                        if objective_evaluator.kinase_mpo_objective.is_successful(mol):
+                            is_successful = True
+                            success_count += 1
+
+                        # --- Score Handling ---
+                        val_ = grouped_results[0]["top_20_molecules"][0][mol]
+                        if val_ == float("-inf"):
+                            val_ = 0.0
+                        scores.append(val_)
+
+                        if not is_successful:
+                            continue
+
+                        # individual metrics for each scaffold
+                        if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+                            individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol)
+                            gsk = individual_scores.get('GSK3B')
+                            jnk = individual_scores.get('JNK3')
+                            qed = individual_scores.get('QED')
+                            sa = individual_scores.get('SA')
+
+                        break
+
+            total_mols += 1
+
+
+            if not scores:
+                print("[Val] No valid molecules generated.")
+                return float("-inf"), 0.0
+
+
+            # --- Logging ---
+
+            # Write EVERY beam to the CSV
+            writer.writerow({
+                'scaffold_idx': idx,
+                'prompt_smiles': prompt,
+                'generated_smiles': mol,
+                'objective_score': val_,
+                'is_successful': is_successful,
+                'gsk3b': gsk,
+                'jnk3': jnk,
+                'qed': qed,
+                'sa': sa
+            })
+
+
+            # Memory cleanup
+            del grouped_results
+            # import gc; gc.collect() # Uncomment if memory is extremely tight
+
+
+    # Final Aggregation
+    metrics_out = {
+        f"{eval_type}_success_rate": success_count/total_mols,
+        f"{eval_type}_mean_top1_obj": np.mean(scores),
+    }
+
+    print("=" * 30)
+    print(f"EVALUATION REPORT ({eval_type})")
+    print(f"Detailed logs saved to: {csv_path}")
+    print(f"Success Rate: {metrics_out[f'{eval_type}_success_rate'] * 100:.2f}%")
+    print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
+    print("=" * 30)
+
+    return metrics_out
+
 
 
 
@@ -566,10 +955,10 @@ if __name__ == '__main__':
         import socket
 
         ray_init_args["address"] = "local"
-    else:
-        # Cluster settings (Linux)
-        ray_init_args["include_dashboard"] = True  # Useful on cluster
-        # On Slurm, Ray usually auto-detects the address, or you start it via script
+    # else:
+    #     # Cluster settings (Linux)
+    #     ray_init_args["include_dashboard"] = True  # Useful on cluster
+    #     # On Slurm, Ray usually auto-detects the address, or you start it via script
 
     ray.init(**ray_init_args)
 
@@ -737,12 +1126,23 @@ if __name__ == '__main__':
             current_val_mean_score = float("-inf")
             current_val_success_rate = 0.0  # Initialize success rate
 
-            if config.use_validation_for_ckpt and not config.prodrug_mode:
+            if config.use_validation_for_ckpt and not config.prodrug_mode and config.use_dr_grpo:
                 # Unpack the two return values
                 current_val_mean_score, current_val_success_rate = validate_epoch(config, network, objective_eval)
 
                 generated_loggable_dict["validation_mean_score"] = current_val_mean_score
                 generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
+
+            elif config.use_validation_for_ckpt and not config.prodrug_mode and not config.use_dr_grpo:
+                # Unpack the two return values
+                current_val_mean_score, current_val_success_rate, individual_scores = validate_supervised('validation', config, network, objective_eval)
+
+                generated_loggable_dict["validation_mean_score"] = current_val_mean_score
+                generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
+                generated_loggable_dict["gsk"] = individual_scores.get('gsk3b', float('nan'))
+                generated_loggable_dict["jnk"] = individual_scores.get('jnk3', float('nan'))
+                generated_loggable_dict["qed"] = individual_scores.get('qed', float('nan'))
+                generated_loggable_dict["sa"] = individual_scores.get('sa', float('nan'))
             # -----------------------------
 
             # Update all-time top-K SMILES archive
@@ -874,13 +1274,13 @@ if __name__ == '__main__':
 
     torch.cuda.empty_cache()
     with torch.no_grad():
-        test_loggable_dict, test_text_to_save = evaluate('test', config, network, objective_eval)
+        if config.use_dr_grpo:
+            test_loggable_dict = evaluate('test', config, network, objective_eval)
+        else:
+            test_loggable_dict = evaluate_supervised('test', config, network, objective_eval)
     print(">> TEST")
     print(test_loggable_dict)
     logger.log_metrics(test_loggable_dict, step=0, step_desc="test")
-    print(test_text_to_save)
-    logger.text_artifact(os.path.join(config.results_path, "test_top_20_molecules.txt"),
-                         test_text_to_save)
 
     # WanB finish
     if hasattr(config, 'use_wandb') and config.use_wandb:

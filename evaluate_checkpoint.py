@@ -104,7 +104,7 @@ def evaluate(eval_type: str, config: MoleculeConfig, network: MoleculeTransforme
 
                 best_score = max(objs)
                 mean_score = np.mean(objs)
-                is_solved = 1.0 if best_score > SUCCESS_THRESHOLD else 0.0
+                is_solved = objective_evaluator.kinase_mpo_objective.is_successful(smi)
                 scaffold_metrics.append({"solved": is_solved, "top1": best_score, "mean": mean_score})
 
             del grouped_trajectories
