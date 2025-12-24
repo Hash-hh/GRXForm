@@ -20,8 +20,8 @@ class MoleculeConfig(BaseConfig):
 
         # --- INFERENCE (Test on Scaffolds) ---
         seed = 42
-        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/test_scaffolds_small.txt"  # test scaffolds
-        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/val_scaffolds_small.txt"
+        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
+        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/val_scaffolds.txt"
 
         # --- RL METHOD ---
         self.use_dr_grpo = False
@@ -43,7 +43,7 @@ class MoleculeConfig(BaseConfig):
         self.use_wandb = 'auto'  # Master switch for WandB logging
         self.wandb_project = "graphxform-rl-paper"
         self.wandb_entity = "hasham"  # wandb username or team name
-        self.wandb_run_name = f"TCase1_test_scaffolds_{self.objective_type}_Seed{self.seed}"
+        self.wandb_run_name = f"TASAR_{self.objective_type}_Seed{self.seed}"
 
         # Resolve "auto" setting based on OS
         if self.use_wandb == "auto":

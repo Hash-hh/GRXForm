@@ -170,56 +170,47 @@ def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
     success_count = 0
     total_mols = 0
 
-    for idx, prompt in tqdm(enumerate(validitation_prompts), total=len(validitation_prompts), desc=f"Evaluating ({eval_type})"):
+    # Generate K candidates for this SINGLE prompt
+    grouped_results = [dataset.generate_dataset(
+        network_weights=weights,
+        memory_aggressive=False,
+        prompts=validitation_prompts,
+        return_raw_trajectories=True,
+        mode="eval"
+    )]
 
-        # Generate K candidates for this SINGLE prompt
-        grouped_results = [dataset.generate_dataset(
-            network_weights=weights,
-            memory_aggressive=False,
-            prompts=[prompt],
-            return_raw_trajectories=True,
-            mode="eval"
-        )]
+    smiles = list(grouped_results[0]['top_20_molecules'][0].keys())
+
+    for idx, mol in tqdm(enumerate(smiles), total=len(grouped_results), desc=f"Evaluating ({eval_type})"):
 
 
         # Check if we should calculate success rate (Only available for Kinase MPO)
         check_success = (config.objective_type == 'kinase_mpo') and hasattr(objective_evaluator,
                                                                             'kinase_mpo_objective')
+        if check_success and mol:
+            # Access the underlying KinaseMPOObjective instance directly
+            if objective_evaluator.kinase_mpo_objective.is_successful(mol):
+                success_count += 1
 
-        if grouped_results and grouped_results[0]["best_gen_obj"] is not None:
-            for mol in list(grouped_results[0]["top_20_molecules"][0].keys()):  # loop over all the beam leaves (only one beam leaf if beam_width=1)
+            scores.append(grouped_results[0]["top_20_molecules"][0][mol])
 
-                # --- Success Rate Handling ---
-                if check_success and mol:
-                    # Access the underlying KinaseMPOObjective instance directly
-                    if objective_evaluator.kinase_mpo_objective.is_successful(mol):
-                        success_count += 1
-
-                    # --- Score Handling ---
-                    val_ = grouped_results[0]["top_20_molecules"][0][mol]
-                    if val_ == float("-inf"):
-                        val_ = 0.0
-                    scores.append(val_)
-
-                    # individual metrics for each scaffold
-                    if hasattr(objective_evaluator, 'kinase_mpo_objective'):
-                        individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol)
-
-                    break
+            # # individual metrics for each scaffold
+            # if hasattr(objective_evaluator, 'kinase_mpo_objective'):
+            #     individual_scores = objective_evaluator.kinase_mpo_objective.individual_scores(mol)
 
         total_mols += 1
 
 
-        if not scores:
-            print("[Val] No valid molecules generated.")
-            return float("-inf"), 0.0
+        # if not scores:
+        #     print("[Val] No valid molecules generated.")
+        #     return float("-inf"), 0.0
 
 
-        # --- Logging ---
+    # --- Logging ---
 
-        # Memory cleanup
-        del grouped_results
-        # import gc; gc.collect() # Uncomment if memory is extremely tight
+    # Memory cleanup
+    del grouped_results
+    # import gc; gc.collect() # Uncomment if memory is extremely tight
 
 
     # Final Aggregation
@@ -234,7 +225,7 @@ def validate_supervised(eval_type: str, config_orig: MoleculeConfig, network: Mo
     print(f"Mean Top-1: {metrics_out[f'{eval_type}_mean_top1_obj']:.4f}")
     print("=" * 30)
 
-    return success_count/total_mols, np.mean(scores), individual_scores
+    return np.mean(scores), success_count/total_mols, []  #individual_scores  TODO: Also log individual scores
 
 
 def train_for_one_epoch_supervised(epoch: int,
@@ -1139,10 +1130,7 @@ if __name__ == '__main__':
 
                 generated_loggable_dict["validation_mean_score"] = current_val_mean_score
                 generated_loggable_dict["validation_success_rate"] = current_val_success_rate  # Log to file
-                generated_loggable_dict["gsk"] = individual_scores.get('gsk3b', float('nan'))
-                generated_loggable_dict["jnk"] = individual_scores.get('jnk3', float('nan'))
-                generated_loggable_dict["qed"] = individual_scores.get('qed', float('nan'))
-                generated_loggable_dict["sa"] = individual_scores.get('sa', float('nan'))
+
             # -----------------------------
 
             # Update all-time top-K SMILES archive
