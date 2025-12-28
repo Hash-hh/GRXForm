@@ -549,6 +549,13 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
 
         for idx, prompt in tqdm(enumerate(test_prompts), total=len(test_prompts), desc=f"Evaluating ({eval_type})"):
 
+            # Initialize defaults
+            smi = ""
+            obj_val = 0.0
+            is_successful = False
+            gsk, jnk, qed, sa = 0, 0, 0, 0
+            val_ = 0.0
+
             # Generate K candidates for this SINGLE prompt
             grouped_results = dataset.generate_dataset(
                 network_weights=weights,
@@ -601,11 +608,9 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
 
             for mol in ordered_group:  # beam leaves
                 is_successful = False
-
                 obj_val = mol.objective if mol.objective is not None else float("-inf")
                 smi = mol.smiles_string if mol.smiles_string else ""
 
-                # --- Success rate ---
                 if check_success and mol:
                     if objective_evaluator.kinase_mpo_objective.is_successful(mol.smiles_string):
                         is_successful = True
@@ -636,23 +641,23 @@ def evaluate(eval_type: str, config_orig: MoleculeConfig, network: MoleculeTrans
                 return float("-inf"), 0.0
 
 
-        # Write EVERY beam leaf to the CSV
-        writer.writerow({
-            'scaffold_idx': idx,
-            'prompt_smiles': prompt,
-            'generated_smiles': smi,
-            'objective_score': obj_val if obj_val > float("-inf") else 0.0,
-            'is_successful': False,
-            'gsk3b': gsk,
-            'jnk3': jnk,
-            'qed': qed,
-            'sa': sa
-        })
+            # Write EVERY beam leaf to the CSV
+            writer.writerow({
+                'scaffold_idx': idx,
+                'prompt_smiles': prompt,
+                'generated_smiles': smi,
+                'objective_score': obj_val if obj_val > float("-inf") else 0.0,
+                'is_successful': is_successful,
+                'gsk3b': gsk,
+                'jnk3': jnk,
+                'qed': qed,
+                'sa': sa
+            })
 
 
-        # Memory cleanup
-        del grouped_results
-        # import gc; gc.collect() # Uncomment if memory is extremely tight
+            # Memory cleanup
+            del grouped_results
+            # import gc; gc.collect() # Uncomment if memory is extremely tight
 
 
     # 4. Final Aggregation

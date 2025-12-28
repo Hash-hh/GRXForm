@@ -35,7 +35,7 @@ class MoleculeConfig(BaseConfig):
 
 
         # load model from checkpoint
-        self.load_checkpoint_from_path = "results/best_model_case3_dec_21.pt"  # If given, model checkpoint is loaded from this path.
+        self.load_checkpoint_from_path = "results/best_model_case2_dec_22_.pt"  # If given, model checkpoint is loaded from this path.
 
 
         # --- WandB Logging ---
