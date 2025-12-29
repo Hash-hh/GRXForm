@@ -898,6 +898,8 @@ if __name__ == '__main__':
     if args.rl_ppo_clip_epsilon is not None:
         config.rl_ppo_clip_epsilon = args.rl_ppo_clip_epsilon
 
+    print("Starting experiment on task:", config.objective_type)
+
     # --- WANDB INITIALIZATION ---
     if hasattr(config, 'use_wandb') and config.use_wandb:
         # Convert the config object to a dictionary for wandb
