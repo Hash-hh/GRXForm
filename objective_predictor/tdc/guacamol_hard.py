@@ -57,13 +57,13 @@ class GuacaMolHardObjective:
             # ECFP6 equivalent is Morgan Radius 3
             self.target_fp = AllChem.GetMorganFingerprintAsBitVect(self.target_mol, 3, nBits=2048)
 
-    def score(self, smiles, mode='hard'):
+    def score(self, smiles, mode='easy'):
         """
         Calculates the RL Reward.
         modes:
           - 'hard': (Benchmark Standard) Returns 0.0 immediately if sim < threshold[cite: 115].
           - 'soft': (Training Curriculum) Returns partial signal (0.1*sim) if sim < threshold.
-          - 'ablation': (Study) Returns geometric mean of all props, ignoring thresholds.
+          - 'easy': (Study) Returns geometric mean of all props, ignoring thresholds.
         """
         if not smiles:
             return 0.0
