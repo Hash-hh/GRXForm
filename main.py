@@ -25,7 +25,7 @@ import wandb
 from config import MoleculeConfig
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.molecule_transformer import MoleculeTransformer, dict_to_cpu
-from molecule_evaluator import MoleculeObjectiveEvaluator
+from molecule_evaluator import MoleculeObjectiveEvaluator, OracleTracker
 from rl_updates import dr_grpo_update, TrajectoryRecord
 
 os.environ["RAY_raylet_start_wait_time_s"] = "120"  # Increase from default 60s
@@ -234,12 +234,14 @@ def train_for_one_epoch_supervised(epoch: int,
                                    network_weights: dict,
                                    optimizer: torch.optim.Optimizer,
                                    objective_evaluator: MoleculeObjectiveEvaluator,
-                                   best_objective: float):
+                                   best_objective: float,
+                                   oracle_tracker_):
     """
     Original supervised fine-tuning path (dataset generation + cross-entropy on heads).
     """
     gumbeldore_dataset = GumbeldoreDataset(
-        config=config, objective_evaluator=objective_evaluator
+        config=config, objective_evaluator=objective_evaluator,
+        oracle_tracker=oracle_tracker_
     )
     metrics = gumbeldore_dataset.generate_dataset(
         network_weights,
@@ -352,6 +354,13 @@ def train_for_one_epoch_supervised(epoch: int,
         metrics["sa_scores"] = np.mean(sa_scores).item()
 
     del metrics["top_20_molecules"]
+
+    # Retrieve the global count to log it
+    current_oracle_count = 0
+    if oracle_tracker_ is not None:
+        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        metrics["num_unique_oracle_calls"] = current_oracle_count
+
     return metrics, top_20_molecules
 
 def train_for_one_epoch_rl(epoch: int,
@@ -360,8 +369,9 @@ def train_for_one_epoch_rl(epoch: int,
                            network_weights: dict,
                            optimizer: torch.optim.Optimizer,
                            objective_evaluator: MoleculeObjectiveEvaluator,
-                            gumbeldore_dataset: GumbeldoreDataset,
-                           novelty_memory: Optional[dict] = None):
+                           gumbeldore_dataset: GumbeldoreDataset,
+                           novelty_memory: Optional[dict] = None,
+                           oracle_tracker_=None):
     """
     RL fine-tuning epoch:
       1. Generate trajectories (terminated molecules) with current policy.
@@ -476,6 +486,12 @@ def train_for_one_epoch_rl(epoch: int,
         top_20_text_lines.append(f"{i + 1:02d}: {entry['smiles']}  obj={entry['obj']:.4f}")
     if not top20:
         top_20_text_lines.append("No terminated molecules")
+
+    # Retrieve the global count to log it
+    current_oracle_count = 0
+    if oracle_tracker_ is not None:
+        current_oracle_count = ray.get(oracle_tracker_.get_count.remote())
+        metrics["num_unique_oracle_calls"] = current_oracle_count
 
     return metrics, top_20_text_lines
 
@@ -962,6 +978,9 @@ if __name__ == '__main__':
 
     print(ray.available_resources())
 
+    # Create the Global Oracle Tracker Actor
+    oracle_tracker = OracleTracker.remote()
+
     logger = Logger(args, config.results_path, config.log_to_file)
     logger.log_hyperparams(config)
     # Seed
@@ -1033,7 +1052,8 @@ if __name__ == '__main__':
 
     # Policy network
     network = MoleculeTransformer(config, config.training_device)
-    objective_eval = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device)
+    objective_eval = MoleculeObjectiveEvaluator(config, device=config.objective_gnn_device,
+                                                oracle_tracker=oracle_tracker)
 
     # Load checkpoint if needed
     if config.load_checkpoint_from_path is not None:
@@ -1097,7 +1117,8 @@ if __name__ == '__main__':
         else:
             novelty_memory = None
 
-        gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=objective_eval)
+        gumbeldore_dset = GumbeldoreDataset(config=config, objective_evaluator=objective_eval,
+                                            oracle_tracker=oracle_tracker)
 
         for epoch in range(config.num_epochs):
             print("------")
@@ -1109,16 +1130,19 @@ if __name__ == '__main__':
             if rl_mode_active:
                 generated_loggable_dict, top20_text = train_for_one_epoch_rl(
                     epoch, config, network, network_weights, optimizer, objective_eval, gumbeldore_dset,
-                    novelty_memory=novelty_memory
+                    novelty_memory=novelty_memory, oracle_tracker_=oracle_tracker
                 )
                 # The last return value (the buffer data) is not needed in the main loop, so we use _
                 val_metric = generated_loggable_dict.get("best_gen_obj", float("-inf"))
 
             else:  # Original Supervised-only mode
                 generated_loggable_dict, top20_text = train_for_one_epoch_supervised(
-                    epoch, config, network, network_weights, optimizer, objective_eval, best_validation_metric
+                    epoch, config, network, network_weights, optimizer, objective_eval, best_validation_metric,
+                    oracle_tracker_=oracle_tracker
                 )
                 val_metric = generated_loggable_dict["best_gen_obj"]
+
+            print("Num Unique Oracle Calls so far: ", generated_loggable_dict["num_unique_oracle_calls"])
 
             # --- [NEW] VALIDATION STEP ---
             current_val_mean_score = float("-inf")
@@ -1201,6 +1225,12 @@ if __name__ == '__main__':
                     "mean_top_20_all_time_obj": generated_loggable_dict.get("mean_top_20_obj"),
                     "learning_rate": scheduler.get_last_lr()[0]
                 }
+                # Fetch count if not already in dict
+                if "num_unique_oracle_calls" not in generated_loggable_dict:
+                    count = ray.get(oracle_tracker.get_count.remote())
+                    generated_loggable_dict["num_unique_oracle_calls"] = count
+
+                wandb_log["num_unique_oracle_calls"] = generated_loggable_dict["num_unique_oracle_calls"]
 
                 if config.use_validation_for_ckpt and not config.prodrug_mode:
                     wandb_log["validation_mean_score"] = current_val_mean_score

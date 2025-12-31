@@ -164,11 +164,27 @@ class PredictorWorker:
         model.eval()
         return model
 
+@ray.remote
+class OracleTracker:
+    def __init__(self):
+        self.seen_smiles = set()
+
+    def register_and_count(self, smiles_list: List[str]) -> int:
+        """
+        Registers new SMILES and returns the total count of unique SMILES seen so far.
+        """
+        for s in smiles_list:
+            self.seen_smiles.add(s)
+        return len(self.seen_smiles)
+
+    def get_count(self) -> int:
+        return len(self.seen_smiles)
 
 class MoleculeObjectiveEvaluator:
-    def __init__(self, config: MoleculeConfig, device: torch.device = None):
+    def __init__(self, config: MoleculeConfig, device: torch.device = None, oracle_tracker=None):
         self.config = config
         self.device = torch.device("cpu") if device is None else device
+        self.oracle_tracker = oracle_tracker
         self.predictor_workers = [PredictorWorker.remote(self.config, self.device) for _ in range(self.config.num_predictor_workers)]
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
@@ -228,6 +244,7 @@ class MoleculeObjectiveEvaluator:
         # i.e., molecules that could be sanitized and are not single carbon atoms.
         feasible_molecules: List[Chem.RWMol] = []
         feasible_idcs = []  # indices of feasible molecules in the original `molecule_designs` list
+        feasible_smiles = []
 
         for i, mol in enumerate(molecule_designs):
             if isinstance(mol, MoleculeDesign):
@@ -236,6 +253,7 @@ class MoleculeObjectiveEvaluator:
                 if not self.infeasible_by_special_constraints(mol):
                     feasible_idcs.append(i)
                     feasible_molecules.append(mol.rdkit_mol)
+                    feasible_smiles.append(mol.smiles_string)
             elif mol != "C":
                 print("Mol is a SMILES string")
                 # is a string
@@ -244,8 +262,16 @@ class MoleculeObjectiveEvaluator:
                     Chem.SanitizeMol(mol)
                     feasible_idcs.append(i)
                     feasible_molecules.append(mol)
+                    feasible_smiles.append(Chem.MolToSmiles(mol))
                 except:
                     continue
+
+        # Oracle Counting Logic
+        # We perform this right here, after feasibility checks but before any prediction model runs.
+        if self.oracle_tracker is not None and len(feasible_molecules) > 0:
+            # Fire and forget (or wait if you want strict synchronization, but not strictly necessary for logging)
+            # We use .remote() to send the update to the global actor.
+            self.oracle_tracker.register_and_count.remote(feasible_smiles)
 
         if getattr(self.config, 'objective_type', '') == 'prodrug_bbb':
             objs = []

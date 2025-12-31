@@ -118,11 +118,13 @@ class JobPool:
 
 class GumbeldoreDataset:
     def __init__(self, config: MoleculeConfig,
-                 objective_evaluator: MoleculeObjectiveEvaluator
+                 objective_evaluator: MoleculeObjectiveEvaluator,
+                 oracle_tracker=None
                  ):
         self.config = config
         self.gumbeldore_config = config.gumbeldore_config
         self.objective_evaluator = objective_evaluator
+        self.oracle_tracker = oracle_tracker
         self.devices_for_workers: List[str] = self.gumbeldore_config["devices_for_workers"]
 
         self.fragment_library = []
@@ -254,7 +256,8 @@ class GumbeldoreDataset:
             async_sbs_worker.remote(
                 self.config, job_pool, network_weights, device,
                 batch_size_gpu if device != "cpu" else batch_size_cpu,
-                cpu_cores[i], best_objective, memory_aggressive
+                cpu_cores[i], best_objective, memory_aggressive,
+                self.oracle_tracker
             )
             for i, device in enumerate(self.devices_for_workers)
         ]
@@ -428,6 +431,7 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
                      cpu_core: Optional[int] = None,
                      best_objective: Optional[float] = None,
                      memory_aggressive: bool = False,
+                    oracle_tracker=None
                      ):
     network = MoleculeTransformer(config, device)
     network.load_state_dict(network_weights)
@@ -572,7 +576,8 @@ def async_sbs_worker(config: Config, job_pool: JobPool, network_weights: dict,
         network.to(network.device)
         network.eval()
 
-        objective_evaluator = MoleculeObjectiveEvaluator(config, torch.device(config.objective_gnn_device))
+        objective_evaluator = MoleculeObjectiveEvaluator(config, torch.device(config.objective_gnn_device),
+                                                         oracle_tracker=oracle_tracker)
 
         while True:
             batch = ray.get(job_pool.get_jobs.remote(batch_size))
