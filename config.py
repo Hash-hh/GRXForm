@@ -131,7 +131,7 @@ class MoleculeConfig:
         # Self-improvement sequence decoding
         self.gumbeldore_config = {
             # Number of trajectories with the highest objective function evaluation to keep for training
-            "num_trajectories_to_keep": 5,
+            "num_trajectories_to_keep": 10,
             "keep_intermediate_trajectories": False,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cuda:"+target_gpu_id] * 1,
             # "devices_for_workers": ["cuda:0", "cuda:1"],
@@ -209,7 +209,7 @@ class MoleculeConfig:
 
         # --- WandB Logging ---
         self.use_wandb = True  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-battery-chembl-5-samples"
+        self.wandb_project = "graphxform-rl-battery-chembl"
         self.wandb_entity = "mbinjavaid-rwth-aachen-university"  # wandb username or team name
         self.wandb_run_name = f"{self.objective_type}_wor_ent_{entropy_str}_runID_{run_id}"
 
