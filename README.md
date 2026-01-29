@@ -35,9 +35,3 @@ This will automatically run all GuacaMol objectives with their configured entrop
 ## Output
 
 Results, model checkpoints, and logs will be saved to the `results/` directory.
-
-## Acknowledgments
-
-- [rezero](https://github.com/majumderb/rezero)
-- [step-and-reconsider](https://github.com/grimmlab/step-and-reconsider)
-- [gumbeldore](https://github.com/grimmlab/gumbeldore)
