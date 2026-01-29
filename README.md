@@ -1,7 +1,4 @@
 ```markdown
-# GRXform
-
-This is the code repository for the paper **GRXform**.
 
 ## Installation
 
