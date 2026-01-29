@@ -1,6 +1,4 @@
-# GraphXForm: Graph transformer for computer-aided molecular design
-
-This is the repository for the paper **[GraphXForm: Graph transformer for computer-aided molecular design](https://pubs.rsc.org/en/content/articlelanding/2025/dd/d4dd00339j)**, published in Digital Discovery.
+# GRXForm
 
 ## Installation
 
