@@ -162,6 +162,7 @@ class MoleculeConfig:
         self.results_path = os.path.join("./results",
                                          datetime.datetime.now().strftime(
                                              "%Y-%m-%d--%H-%M-%S"))  # Path to store the model weights
+        print("Results path:", self.results_path)
 
         self.log_to_file = True
 
@@ -260,6 +261,7 @@ class MoleculeConfig:
         self.prodrug_log_components = True  # Log individual components of prodrug objective
 
         self.use_grpo_grouping = True  # If True, treats each parent as a separate group in GRPO
+        self.max_oracle_calls = None  # Optional limit on oracle calls during training
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging

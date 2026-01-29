@@ -17,6 +17,7 @@ class MoleculeConfig(BaseConfig):
         self.start_from_c_chains = True  # <--- ON
         self.use_fragment_library = False  # <--- OFF
         self.fragment_library_path = None  # Ignored
+        self.max_oracle_calls = None
 
         # --- INFERENCE (Test on Scaffolds) ---
         seed = 42

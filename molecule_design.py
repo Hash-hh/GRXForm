@@ -702,6 +702,10 @@ class MoleculeDesign(BaseTrajectory):
     @staticmethod
     def from_smiles(config: MoleculeConfig, smiles: str, do_finish=False, compare_smiles=False) -> 'MoleculeDesign':
         mol = Chem.MolFromSmiles(smiles)
+
+        if mol is None:
+            raise ValueError(f"Invalid SMILES string: '{smiles}' - RDKit could not parse it")
+
         Chem.SanitizeMol(mol)
 
         # We MUST use a canonical SMILES to ensure the atom order

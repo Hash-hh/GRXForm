@@ -18,8 +18,7 @@ class KinaseMPOObjective:
         if not smiles:
             return 0.0
 
-        # try:
-        # 1. Get raw scores
+        # Get raw scores
         # GSK3B and JNK3 return probabilities [0, 1]
         gsk_score = self.gsk3(smiles)
         jnk_score = self.jnk3(smiles)
@@ -31,17 +30,11 @@ class KinaseMPOObjective:
         raw_sa = self.sa(smiles)
         sa_norm = (10 - raw_sa) / 9.0
 
-        # 2. Compute RL Reward (Soft Signal)
-        # We SUM them to provide a smooth gradient for the agent.
-        # If we used hard constraints here, the agent would get 0 reward
-        # for 99% of steps and fail to learn (Cold Start problem).
+        # Compute RL Reward (Soft Signal)
         reward = gsk_score + jnk_score + qed_score + sa_norm
         reward = reward / 4.0 # Normalize to [0, 1]
 
         return reward
-        # except Exception as e:
-        #     # If RDKit fails to parse, return 0
-        #     return 0.0
 
     def is_successful(self, smiles):
         """

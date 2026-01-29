@@ -4,8 +4,7 @@ import platform
 
 class MoleculeConfig(BaseConfig):
     """
-    Scenario A: Case 1 (De Novo Training)
-    Train on "C", ignore scaffolds. Test on Scaffolds to see if it generalizes.
+    Scenario: TASAR
     """
 
     def __init__(self):
@@ -20,8 +19,8 @@ class MoleculeConfig(BaseConfig):
 
         # --- INFERENCE (Test on Scaffolds) ---
         seed = 42
-        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
-        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/val_scaffolds.txt"
+        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
+        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{seed}/val_scaffolds.txt"
 
         # --- RL METHOD ---
         self.use_dr_grpo = False
@@ -33,15 +32,15 @@ class MoleculeConfig(BaseConfig):
 
         # sampling parameters
         self.gumbeldore_config["search_type"] = 'tasar'
-        self.gumbeldore_config["beam_width"] = 320
+        self.gumbeldore_config["beam_width"] = 160
         self.num_prompts_per_epoch = 1
-        self.fixed_test_beam_width = 32
+        self.fixed_test_beam_width = 1
         self.num_epochs = 500
 
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
+        self.wandb_project = "graphxform-rl-paper-v2"
         self.wandb_entity = "hasham"  # wandb username or team name
         self.wandb_run_name = f"TASAR_{self.objective_type}_Seed{self.seed}"
 

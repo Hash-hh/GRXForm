@@ -17,26 +17,27 @@ class MoleculeConfig(BaseConfig):
         self.start_from_c_chains = True  # <--- ON
         self.use_fragment_library = False  # <--- OFF
         self.fragment_library_path = None  # Ignored
+        self.max_oracle_calls = 50000
 
         # --- INFERENCE (Test on Scaffolds) ---
         seed = 42
-        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
-        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits/run_seed_{seed}/val_scaffolds.txt"
+        self.evaluation_scaffolds_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{seed}/test_scaffolds.txt"  # test scaffolds
+        self.validation_scaffolds_path = f"scaffold_splitting/zinc_splits_optimized/run_seed_{seed}/val_scaffolds.txt"
 
         # --- RL METHOD ---
         self.use_dr_grpo = True
         self.use_grpo_grouping = True  # Standard GRPO
 
         # sampling parameters
-        self.gumbeldore_config["beam_width"] = 320
+        self.gumbeldore_config["beam_width"] = 160
         self.num_prompts_per_epoch = 1
-        self.fixed_test_beam_width = 32
+        self.fixed_test_beam_width = 1
         self.num_epochs = 500
 
 
         # --- WandB Logging ---
         self.use_wandb = 'auto'  # Master switch for WandB logging
-        self.wandb_project = "graphxform-rl-paper"
+        self.wandb_project = "graphxform-rl-paper-v2"
         self.wandb_entity = "hasham"  # wandb username or team name
         self.wandb_run_name = f"Case1_DeNovo_{self.objective_type}_Seed{self.seed}"
 
