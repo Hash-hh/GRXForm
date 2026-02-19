@@ -99,6 +99,6 @@ The codebase natively supports the objective functions discussed in the paper:
 Results, model checkpoints, and logs are saved to the `results` directory by default. Outputs include:
 
 * `best_model.pt` and `last_model.pt` weights.  
-* Detailed CSV logs generated during validation and testing, containing starting prompts, generated SMILES, objective scores, and constraint satisfaction statuses.  
+* CSV logs generated during testing, containing starting SMILES, generated SMILES, and objective scores.
 * Text files logging the top generated molecules per epoch.  
 * Weights & Biases logging (if enabled via `use_wandb = True` in the configuration).
