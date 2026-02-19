@@ -65,7 +65,7 @@ The framework is controlled via configuration files and command-line arguments. 
 
 Key variables in `config.py`:
 
-* `objective_type`: Sets the target objective (e.g., `"kinase_mpo"`, `"prodrug_bbb"`, `"jnk3"`).  
+* `objective_type`: Sets the target objective (e.g., `"kinase_mpo"`, `"prodrug_bbb"`).
 * `use_dr_grpo`: Set to True to enable GRPO reinforcement learning. Set to False to run supervised fine-tuning.  
 * `use_fragment_library`: Master switch for structural conditioning (scaffold-based generation).
 
