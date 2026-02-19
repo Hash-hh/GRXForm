@@ -22,7 +22,10 @@ You can pretrain youself or use the provided pretrained checkpoint.
 
 ### Pretrained checkpoint download
 
-Download the pretrained checkpoint [here](https://syncandshare.lrz.de/dl/fiJs7ZHuCFsVskeoab5aZg/graphxform_pretrained.zip).
+Download the pretrained checkpoint [here](https://drive.google.com/file/d/14HFad1ZQHlbU33J6D87uVWeNXcQRWAzl/view?usp=sharing).
+
+You can use this checkpoint for fine-tuning on downstream tasks by specifying the path to the checkpoint in `config.py` (in variable `load_checkpoint_from_path`).
+
 
 ### Pretrain yourself
 
@@ -51,7 +54,7 @@ if __name__ == '__main__':
 ```
 4. The terminal output will show under which subdirectory (named after timestamp) in `./results` the script will save the model checkpoints.
 
-5. After pretraining, the best model checkpoint (lowest validation loss) will be saved as `best_model.pt` in the corresponding subdirectory in `./results`. You can use this checkpoint for fine-tuning on downstream tasks by specifying the path to the checkpoint in `config.py` (in `load_checkpoint_from_path`).
+5. After pretraining, the best model checkpoint (lowest validation loss) will be saved as `best_model.pt` in the corresponding subdirectory in `./results`. You can use this checkpoint for fine-tuning on downstream tasks by specifying the path to the checkpoint in `config.py` (in variable `load_checkpoint_from_path`).
 
 ## **Data Preparation**
 
