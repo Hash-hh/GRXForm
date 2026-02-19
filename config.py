@@ -5,7 +5,6 @@ import datetime
 class MoleculeConfig:
     def __init__(self):
         self.seed = 42
-
         # Network and environment
         self.latent_dimension = 512
         self.num_transformer_blocks = 10
