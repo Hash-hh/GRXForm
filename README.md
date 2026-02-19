@@ -17,7 +17,6 @@ Create the required directories:
 ### Running the PMO Benchmark
 
 Simply run the benchmark script:
-
 `python run_benchmark.py`
 
 This will automatically run all objectives with their configured entropy values, executing each experiment 3 times.
