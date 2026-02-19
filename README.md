@@ -84,7 +84,7 @@ To run a specific experiment configuration module from an Experiments/ directory
 
 You can also override specific RL hyperparameters directly via the command line:
 
-`python main.py --learning_rate 1e-4 --rl_entropy_beta 0.001 --ppo\_epochs 1 --rl_ppo_clip_epsilon 0.2`
+`python main.py --learning_rate 1e-4 --rl_entropy_beta 0.001 --ppo_epochs 1 --rl_ppo_clip_epsilon 0.2`
 
 ## **Supported Evaluation Tasks**
 
