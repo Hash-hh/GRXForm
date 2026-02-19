@@ -89,7 +89,7 @@ The codebase natively supports the objective functions discussed in the paper:
 
 1. **Kinase Scaffold Decoration (Kinase MPO):** Multi-objective optimization targeting GSK3B and JNK3 activity, QED, and Synthetic Accessibility (SA).  
 2. **Prodrug Transfer:** Structural transformation targeting blood-brain barrier permeability (optimizing for Delta LogP, HBD masking, cleavability, and QED).  
-3. **PMO Benchmark:** Single-objective de-novo generation tasks utilizing the standard PMO/GuacaMol evaluation suite. **Note: To reproduce the PMO benchmark results, please use the grpo\_pmo branch of this repository.**
+3. **PMO Benchmark:** Single-objective de-novo generation tasks utilizing the standard PMO/GuacaMol evaluation suite. **Note: To reproduce the PMO benchmark results, please use the `pmo` branch of this repository.**
 
 ## **Output**
 
