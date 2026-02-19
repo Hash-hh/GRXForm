@@ -50,7 +50,6 @@ if __name__ == '__main__':
 5. After pretraining, the best model checkpoint (lowest validation loss) will be saved as `best_model.pt` in the corresponding subdirectory in `./results`. You can use this checkpoint for fine-tuning on downstream tasks by specifying the path to the checkpoint in `config.py` (in `load_checkpoint_from_path`).
 
 ## Usage
-
 ### Running the PMO Benchmark
 
 Simply run the benchmark script:
