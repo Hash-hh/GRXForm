@@ -10,6 +10,12 @@ Install the dependencies found in requirements.txt:
 
 `pip install -r requirements.txt`
 
+Additionally, install **[torch_scatter](https://github.com/rusty1s/pytorch_scatter)** with options corresponding to your hardware.
+
+Create the required directories:
+
+`mkdir -p results data/chembl/pretrain_sequences`
+
 ## Pretraining
 
 You can pretrain youself or use the provided pretrained checkpoint.
